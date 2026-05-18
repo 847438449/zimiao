@@ -88,6 +88,9 @@ class Config():
             self.feature_convergence_strategy = self.config_Control_Filter.get("feature_convergence_strategy", fallback="strategy_first")
             self.system_cooperative_filtering = self.config_Control_Filter.getboolean("system_cooperative_filtering", fallback=True)
             self.processing_alpha = self.config_Control_Filter.getfloat("processing_alpha", fallback=0.35)
+            self.error_deadzone_pixels = self.config_Control_Filter.getfloat("error_deadzone_pixels", fallback=2.0)
+            self.capture_zone_radius = self.config_Control_Filter.getfloat("capture_zone_radius", fallback=20.0)
+            self.max_control_step_pixels = self.config_Control_Filter.getfloat("max_control_step_pixels", fallback=32.0)
             self.current_res_mode = self.config_Control_Filter.get("current_res_mode", fallback="1080P OBS虚拟流 -> 2K 物理屏 (1.33x)")
             self.ema_alpha = self.config_Control_Filter.getfloat("ema_alpha", fallback=0.35)
         else:
@@ -99,6 +102,9 @@ class Config():
             self.feature_convergence_strategy = self.config_Aim.get("feature_convergence_strategy", fallback="strategy_first")
             self.system_cooperative_filtering = self.config_Aim.getboolean("system_cooperative_filtering", fallback=True)
             self.processing_alpha = self.config_Aim.getfloat("processing_alpha", fallback=0.35)
+            self.error_deadzone_pixels = self.config_Aim.getfloat("error_deadzone_pixels", fallback=2.0)
+            self.capture_zone_radius = self.config_Aim.getfloat("capture_zone_radius", fallback=20.0)
+            self.max_control_step_pixels = self.config_Aim.getfloat("max_control_step_pixels", fallback=32.0)
             self.current_res_mode = self.config_Aim.get("current_res_mode", fallback="1080P OBS虚拟流 -> 2K 物理屏 (1.33x)")
             self.ema_alpha = self.config_Aim.getfloat("ema_alpha", fallback=0.35)
 

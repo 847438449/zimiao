@@ -3,6 +3,7 @@ import time
 import math
 import os
 import configparser
+import queue
 import json
 import random
 import socket
@@ -31,7 +32,9 @@ class MouseThread:
         self.mouse_sensitivity = cfg.mouse_sensitivity
         self.fov_x = cfg.mouse_fov_width
         self.fov_y = cfg.mouse_fov_height
-        self.disable_prediction = cfg.disable_prediction
+        # Prediction is centralized in frame_parser.py. Keep the legacy mouse-layer
+        # predictor hard-disabled to avoid double feed-forward / overshoot.
+        self.disable_prediction = True
         self.prediction_interval = cfg.prediction_interval
         self.bScope_multiplier = cfg.bScope_multiplier
         self.screen_width = cfg.detection_window_width
@@ -57,6 +60,16 @@ class MouseThread:
         self.udp_send_json = cfg.udp_send_json
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if self.udp_output else None
         self.current_aim_mode = "UDP" if self.udp_output else "MOVE"
+        self.runtime_config = configparser.ConfigParser()
+        self.runtime_config_last_read = 0.0
+        self.runtime_config_reload_interval = 0.05
+        self.local_residual_x = 0.0
+        self.local_residual_y = 0.0
+        self.subpixel_deadzone_pixels = 0.45
+        self.subpixel_y_deadzone_pixels = 0.75
+        self.local_output_gain = 0.85
+        self.last_stream_log_time = 0.0
+        self.stream_log_interval = 0.10
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
@@ -81,18 +94,23 @@ class MouseThread:
                 logger.error("Failed to initialize rzctl")
 
     def process_data(self, data):
+        target_velocity_abs = 0.0
         if isinstance(data, sv.Detections):
             target_x, target_y = data.xyxy.mean(axis=1)
             target_w, target_h = data.xyxy[:, 2] - data.xyxy[:, 0], data.xyxy[:, 3] - data.xyxy[:, 1]
             target_cls = data.class_id[0] if data.class_id.size > 0 else None
         else:
-            target_x, target_y, target_w, target_h, target_cls = data
+            if len(data) >= 6:
+                target_x, target_y, target_w, target_h, target_cls, target_velocity_abs = data
+            else:
+                target_x, target_y, target_w, target_h, target_cls = data
 
         self.visualize_target(target_x, target_y, target_cls)
         self.bScope = self.check_target_in_scope(target_x, target_y, target_w, target_h, self.bScope_multiplier) if cfg.auto_shoot or cfg.triggerbot else False
         self.bScope = cfg.force_click or self.bScope
 
         if not self.disable_prediction:
+            # Deprecated safeguard: normal runtime keeps this branch disabled.
             current_time = time.time()
             if not isinstance(data, sv.Detections):
                 target_x, target_y = self.predict_target_position(target_x, target_y, current_time)
@@ -104,11 +122,20 @@ class MouseThread:
         shooting_state = self.get_shooting_key_state()
 
         self.visualize_history(target_x, target_y)
-        shooting.queue.put((self.bScope, shooting_state))
+        self.enqueue_shooting_state(self.bScope, shooting_state)
 
-        dx, dy = self.apply_ema_filter(dx, dy)
-        dx, dy, scale_factor = self.apply_resolution_scale(dx, dy)
-        dx, dy, random_multiplier = self.apply_udp_random_multiplier(dx, dy)
+        if self.is_inside_error_deadzone(dx, dy):
+            self.reset_ema_filter()
+            dx, dy = 0.0, 0.0
+            decay_gain = 0.0
+            scale_factor = self.read_scale_adjustment_factor()
+            random_multiplier = 1.0
+        else:
+            dx, dy = self.apply_ema_filter(dx, dy, target_velocity_abs)
+            dx, dy, scale_factor = self.apply_error_adaptive_gain(dx, dy)
+            dx, dy, random_multiplier = self.apply_udp_random_multiplier(dx, dy, target_velocity_abs)
+            dx, dy, decay_gain = self.apply_capture_zone_gain_decay(dx, dy, target_velocity_abs)
+            dx, dy = self.apply_saturation_clamp(dx, dy)
 
         source_mode = self.read_current_source_mode()
         self.dispatch_control_pulse(
@@ -123,12 +150,29 @@ class MouseThread:
             source_mode,
             random_multiplier,
             scale_factor,
+            decay_gain,
         )
 
-    def read_runtime_config(self):
-        parser = configparser.ConfigParser()
-        parser.read("config.ini", encoding="utf-8")
-        return parser
+    def enqueue_shooting_state(self, b_scope, shooting_state):
+        """Publish shooting state without blocking the high-frequency movement loop."""
+        try:
+            if shooting.queue.full():
+                try:
+                    shooting.queue.get_nowait()
+                except queue.Empty:
+                    pass
+            shooting.queue.put_nowait((b_scope, shooting_state))
+        except queue.Full:
+            pass
+
+    def read_runtime_config(self, force=False):
+        now = time.monotonic()
+        if (not force) and (now - self.runtime_config_last_read < self.runtime_config_reload_interval):
+            return self.runtime_config
+        self.runtime_config.clear()
+        self.runtime_config.read("config.ini", encoding="utf-8")
+        self.runtime_config_last_read = now
+        return self.runtime_config
 
     def read_current_source_mode(self):
         try:
@@ -144,9 +188,44 @@ class MouseThread:
             alpha = getattr(cfg, "ema_alpha", 0.35)
         return max(0.0, min(1.0, float(alpha)))
 
-    def apply_ema_filter(self, dx, dy):
-        """Apply first-order low-pass EMA to final target deltas before scaling."""
-        alpha = self.read_ema_alpha()
+    def read_error_deadzone_pixels(self):
+        try:
+            return max(0.0, self.read_runtime_config().getfloat("Control_Filter", "error_deadzone_pixels", fallback=2.0))
+        except Exception:
+            return max(0.0, float(getattr(cfg, "error_deadzone_pixels", 2.0)))
+
+    def read_capture_zone_radius(self):
+        try:
+            return max(1e-6, self.read_runtime_config().getfloat("Control_Filter", "capture_zone_radius", fallback=20.0))
+        except Exception:
+            return max(1e-6, float(getattr(cfg, "capture_zone_radius", 20.0)))
+
+    def is_inside_error_deadzone(self, dx, dy):
+        epsilon = self.read_error_deadzone_pixels()
+        return abs(float(dx)) <= epsilon and abs(float(dy)) <= epsilon
+
+    def reset_ema_filter(self):
+        self.ema_dx, self.ema_dy = 0.0, 0.0
+
+    def adaptive_ema_alpha(self, dx, dy, velocity_abs=0.0):
+        default_alpha = self.read_ema_alpha()
+        deadzone = self.read_error_deadzone_pixels()
+        capture_zone = max(deadzone + 1e-6, self.read_capture_zone_radius())
+        error_norm = math.sqrt(float(dx) ** 2 + float(dy) ** 2)
+
+        if error_norm > 30.0 or float(velocity_abs) > 3.0:
+            error_boost = max(0.0, min(1.0, (error_norm - 30.0) / 70.0))
+            velocity_boost = max(0.0, min(1.0, (float(velocity_abs) - 3.0) / 12.0))
+            dynamic_alpha = 0.70 + 0.25 * max(error_boost, velocity_boost)
+            return max(float(default_alpha), min(0.95, dynamic_alpha))
+
+        min_alpha = min(default_alpha, 0.12)
+        normalized = max(0.0, min(1.0, (error_norm - deadzone) / (capture_zone - deadzone)))
+        return min_alpha + (default_alpha - min_alpha) * normalized
+
+    def apply_ema_filter(self, dx, dy, velocity_abs=0.0):
+        """Apply deviation-sensitive first-order EMA before scaling."""
+        alpha = self.adaptive_ema_alpha(dx, dy, velocity_abs)
         if not hasattr(self, "ema_dx"):
             self.ema_dx, self.ema_dy = dx, dy
         else:
@@ -154,15 +233,71 @@ class MouseThread:
             self.ema_dy = alpha * dy + (1 - alpha) * self.ema_dy
         return self.ema_dx, self.ema_dy
 
-    def apply_udp_random_multiplier(self, dx, dy):
-        """Inject per-frame stochastic resistance into final control offsets."""
+    def apply_capture_zone_gain_decay(self, dx, dy, velocity_abs=0.0):
+        """Apply nonlinear gain decay unless target velocity needs full tracking force."""
+        if float(velocity_abs) > 3.0:
+            return dx, dy, 1.0
+
+        capture_zone = self.read_capture_zone_radius()
+        error_norm = math.sqrt(float(dx) ** 2 + float(dy) ** 2)
+        if error_norm >= capture_zone:
+            return dx, dy, 1.0
+
+        min_gain = 0.15
+        normalized = max(0.0, min(1.0, error_norm / capture_zone))
+        curve = (1.0 - math.exp(-3.0 * normalized)) / (1.0 - math.exp(-3.0))
+        decay_gain = min_gain + (1.0 - min_gain) * curve
+        return dx * decay_gain, dy * decay_gain, decay_gain
+
+    def apply_udp_random_multiplier(self, dx, dy, velocity_abs=0.0):
+        """Apply bounded stochastic damping; bypass under high-bandwidth tracking demand."""
+        error_norm = math.sqrt(float(dx) ** 2 + float(dy) ** 2)
+        if error_norm > 30.0 or float(velocity_abs) > 3.0:
+            return dx, dy, 1.0
+
         min_mult = float(getattr(cfg, "mouse_min_speed_multiplier", self.min_speed_multiplier))
         max_mult = float(getattr(cfg, "mouse_max_speed_multiplier", self.max_speed_multiplier))
+        min_mult = max(0.80, min(1.0, min_mult))
+        max_mult = max(0.80, min(1.0, max_mult))
         if min_mult > max_mult:
             min_mult, max_mult = max_mult, min_mult
 
         current_random_multiplier = random.uniform(min_mult, max_mult)
         return dx * current_random_multiplier, dy * current_random_multiplier, current_random_multiplier
+
+    def read_max_control_step_pixels(self):
+        try:
+            return max(1.0, self.read_runtime_config().getfloat("Control_Filter", "max_control_step_pixels", fallback=32.0))
+        except Exception:
+            return max(1.0, float(getattr(cfg, "max_control_step_pixels", 32.0)))
+
+    def apply_saturation_clamp(self, dx, dy):
+        """Critically damped vector clamp: fast acquisition without crossing the residual."""
+        base_step = self.read_max_control_step_pixels()
+        error_norm = math.sqrt(float(dx) ** 2 + float(dy) ** 2)
+        if error_norm <= 1e-6:
+            return 0.0, 0.0
+
+        if error_norm > 30.0:
+            release = min(18.0, math.log1p((error_norm - 30.0) / 25.0) * 12.0)
+            max_step = base_step + release
+        else:
+            max_step = base_step
+
+        # Brake as the residual shrinks: never command a full jump across the target.
+        if error_norm < 18.0:
+            residual_fraction_limit = max(1.0, error_norm * 0.45)
+        elif error_norm < 45.0:
+            residual_fraction_limit = max(3.0, error_norm * 0.62)
+        else:
+            residual_fraction_limit = max(8.0, error_norm * 0.72)
+
+        max_step = min(max_step, residual_fraction_limit)
+        if error_norm <= max_step:
+            return float(dx), float(dy)
+
+        scale = max_step / error_norm
+        return float(dx) * scale, float(dy) * scale
 
     def refresh_geometry_from_config(self):
         """Hot-read ROI dimensions so center math tracks 320/448 UI switches."""
@@ -201,8 +336,29 @@ class MouseThread:
         scaled_dy = dy * scale_factor
         return scaled_dx, scaled_dy, scale_factor
 
-    def log_mouse_stream(self, dx, dy, target_cls, random_multiplier=None, scale_factor=None):
-        """Print the high-frequency virtual mouse offset stream for debugging."""
+    def apply_error_adaptive_gain(self, dx, dy):
+        """Nonlinear error-adaptive gain: high bandwidth for large residuals, damping near lock."""
+        base_scale = self.read_scale_adjustment_factor()
+        error_norm = math.sqrt(float(dx) ** 2 + float(dy) ** 2)
+
+        if error_norm > 30.0:
+            # Moderate boost for faster acquisition while keeping overshoot bounded.
+            normalized = max(0.0, min(1.0, (error_norm - 30.0) / 70.0))
+            boost_scale = 1.12 + 0.18 * normalized
+            scale_factor = max(float(base_scale), boost_scale)
+        else:
+            # Precision adsorption zone: return to the configured damping scale.
+            scale_factor = float(base_scale)
+
+        return dx * scale_factor, dy * scale_factor, scale_factor
+
+    def log_mouse_stream(self, dx, dy, target_cls, random_multiplier=None, scale_factor=None, decay_gain=None):
+        """Print a throttled mouse stream sample; never flush-log every control pulse."""
+        now = time.monotonic()
+        if now - self.last_stream_log_time < self.stream_log_interval:
+            return
+        self.last_stream_log_time = now
+
         if target_cls is None:
             cls_str = "❔ UNKNOWN"
         else:
@@ -216,12 +372,14 @@ class MouseThread:
 
         rand_part = "" if random_multiplier is None else f" | Rand: {float(random_multiplier):.3f}"
         scale_part = "" if scale_factor is None else f" | Scale: {float(scale_factor):.4g}"
+        decay_part = "" if decay_gain is None else f" | Decay: {float(decay_gain):.3f}"
         message = (
             f"[Mouse Stream] Target: {cls_str:<10} | "
             f"dx: {float(dx):+6.1f} | dy: {float(dy):+6.1f} | "
             f"Mode: {self.current_aim_mode:<4}"
             f"{rand_part}"
             f"{scale_part}"
+            f"{decay_part}"
         )
         try:
             print(message, flush=True)
@@ -302,7 +460,8 @@ class MouseThread:
 
         return speed_multiplier
 
-    def calc_movement(self, target_x, target_y, target_cls):
+    def DEPRECATED_calc_movement(self, target_x, target_y, target_cls):
+        raise NotImplementedError("calc_movement is deprecated; direct 1:1 pixel servo path is the only supported output path.")
         offset_x = target_x - self.center_x
         offset_y = target_y - self.center_y
         distance = math.sqrt(offset_x**2 + offset_y**2)
@@ -333,6 +492,29 @@ class MouseThread:
         if self.udp_socket is None:
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+    def quantize_local_delta(self, dx, dy):
+        """Accumulate sub-pixel residuals, but leak the integrator near zero to prevent jitter."""
+        if abs(float(dx)) < self.subpixel_deadzone_pixels and abs(float(dy)) < self.subpixel_y_deadzone_pixels:
+            self.local_residual_x *= 0.50
+            self.local_residual_y *= 0.25
+            if abs(self.local_residual_x) < self.subpixel_deadzone_pixels:
+                self.local_residual_x = 0.0
+            if abs(self.local_residual_y) < self.subpixel_y_deadzone_pixels:
+                self.local_residual_y = 0.0
+            return 0, 0
+
+        if abs(float(dy)) < self.subpixel_y_deadzone_pixels:
+            self.local_residual_y *= 0.25
+            dy = 0.0
+
+        total_x = float(dx) + self.local_residual_x
+        total_y = float(dy) + self.local_residual_y
+        move_x = int(round(total_x))
+        move_y = int(round(total_y))
+        self.local_residual_x = total_x - move_x
+        self.local_residual_y = total_y - move_y
+        return move_x, move_y
+
     def local_move(self, dx, dy):
         """
         Send relative mouse movement through the Windows input bus.
@@ -341,7 +523,12 @@ class MouseThread:
         :param dy: final vertical pixel delta after filtering/scaling/randomization
         """
         try:
-            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(dx), int(dy), 0, 0)
+            gain = self.read_runtime_config().getfloat("Control_Filter", "local_output_gain", fallback=self.local_output_gain)
+            gain = max(0.10, min(1.0, float(gain)))
+            move_x, move_y = self.quantize_local_delta(float(dx) * gain, float(dy) * gain)
+            if move_x == 0 and move_y == 0:
+                return
+            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, move_x, move_y, 0, 0)
         except Exception as e:
             print(f"[Mouse Driver Error] Local mouse injection failed: {e}", flush=True)
 
@@ -358,6 +545,7 @@ class MouseThread:
         source_mode,
         random_multiplier,
         scale_factor,
+        decay_gain,
     ):
         if source_mode == "obs":
             self.current_aim_mode = "LOCALAPI"
@@ -366,7 +554,14 @@ class MouseThread:
             self.current_aim_mode = "KMBOX_UDP"
             self.send_udp_packet(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
 
-        self.log_mouse_stream(dx, dy, target_cls, random_multiplier=random_multiplier, scale_factor=scale_factor)
+        self.log_mouse_stream(
+            dx,
+            dy,
+            target_cls,
+            random_multiplier=random_multiplier,
+            scale_factor=scale_factor,
+            decay_gain=decay_gain,
+        )
 
     def send_udp_packet(self, dx, dy, target_x=None, target_y=None, target_w=None, target_h=None, target_cls=None, shooting_state=False):
         """Send the final control vector through the network packet bus."""
@@ -443,7 +638,7 @@ class MouseThread:
         self.mouse_sensitivity = cfg.mouse_sensitivity
         self.fov_x = cfg.mouse_fov_width
         self.fov_y = cfg.mouse_fov_height
-        self.disable_prediction = cfg.disable_prediction
+        self.disable_prediction = True
         self.prediction_interval = cfg.prediction_interval
         self.bScope_multiplier = cfg.bScope_multiplier
         self.screen_width = cfg.detection_window_width

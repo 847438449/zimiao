@@ -185,6 +185,10 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
         config.set("Control_Filter", "feature_convergence_strategy", "strategy_first")
     if not config.has_option("Control_Filter", "processing_alpha"):
         config.set("Control_Filter", "processing_alpha", "0.35")
+    if not config.has_option("Control_Filter", "error_deadzone_pixels"):
+        config.set("Control_Filter", "error_deadzone_pixels", "2.0")
+    if not config.has_option("Control_Filter", "capture_zone_radius"):
+        config.set("Control_Filter", "capture_zone_radius", "20.0")
     if not config.has_option("Control_Filter", "current_res_mode"):
         config.set("Control_Filter", "current_res_mode", "1080P OBS虚拟流 -> 2K 物理屏 (1.33x)")
     if not config.has_option("Control_Filter", "ema_alpha"):
@@ -309,6 +313,8 @@ def ensure_config_schema_on_disk() -> None:
             "active_target_category": config.get("Control_Filter", "active_target_category", fallback="Category_A"),
             "feature_convergence_strategy": config.get("Control_Filter", "feature_convergence_strategy", fallback="strategy_first"),
             "processing_alpha": config.get("Control_Filter", "processing_alpha", fallback="0.35"),
+            "error_deadzone_pixels": config.get("Control_Filter", "error_deadzone_pixels", fallback="2.0"),
+            "capture_zone_radius": config.get("Control_Filter", "capture_zone_radius", fallback="20.0"),
         },
     })
 

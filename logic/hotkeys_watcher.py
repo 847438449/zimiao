@@ -51,17 +51,22 @@ class HotkeysWatcher(threading.Thread):
         return cfg_reload_prev_state
 
     def active_classes(self) -> List[int]:
+        # Allow both the standard model schema and profile_b cascade schema.
+        # Standard: 0/1 body-like, 7 head.  Profile_b: 2/3 high-precision keypoints.
         clss = [0.0, 1.0]
-        
+
+        if not cfg.disable_headshot:
+            clss.extend([2.0, 3.0, 7.0])
+
         if cfg.hideout_targets:
             clss.extend([5.0, 6.0])
 
-        if not cfg.disable_headshot:
-            clss.append(7.0)
-            
         if cfg.third_person:
             clss.append(10.0)
-        
+
+        # Preserve order while removing duplicates.
+        clss = list(dict.fromkeys(clss))
         self.clss = clss
+        return clss
     
 hotkeys_watcher = HotkeysWatcher()

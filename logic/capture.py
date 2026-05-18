@@ -31,6 +31,9 @@ class Capture(threading.Thread):
         logger.info(f"[Capture] Detection ROI initialized: {self.prev_detection_window_width}x{self.prev_detection_window_height}")
 
         self.frame_queue = queue.Queue(maxsize=1)
+        self.config = configparser.ConfigParser()
+        self.config_last_read = 0.0
+        self.config_reload_interval = 0.20
         self.running = True
         self.cap = None
         self.static_frame = None
@@ -106,7 +109,15 @@ class Capture(threading.Thread):
         self.simulation_mode = False
         # Force DirectShow to bypass OpenCV's obsensor auto-probe path.
         camera_index = self.read_obs_camera_index()
-        self.cap = cv2.VideoCapture(int(camera_index), cv2.CAP_DSHOW)
+        obs_idx = int(camera_index)
+        self.cap = cv2.VideoCapture(obs_idx, cv2.CAP_DSHOW)
+
+        # ─── 强行握手 1080P 核心输入总线分辨率 ───
+        # 刚性指定驱动层必须以 1920x1080 满血分辨率输出数据帧，避免 OpenCV 默认 640x480 下采样。
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+
+        # 保持低延迟编码格式。
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.cap.set(cv2.CAP_PROP_FPS, self.USB_CAPTURE_FPS)
 
@@ -211,14 +222,18 @@ class Capture(threading.Thread):
         elif frame.shape[2] == 4:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-        crop_width, crop_height = self.read_detection_window_size()
-        self.update_detection_window(crop_width, crop_height)
-        return self.center_crop(frame, crop_width, crop_height)
+        target_w, target_h = self.read_detection_window_size()
+        self.update_detection_window(target_w, target_h)
+        return frame
 
-    def read_config(self):
-        parser = configparser.ConfigParser()
-        parser.read("config.ini", encoding="utf-8")
-        return parser
+    def read_config(self, force=False):
+        now = time.monotonic()
+        if (not force) and (now - self.config_last_read < self.config_reload_interval):
+            return self.config
+        self.config.clear()
+        self.config.read("config.ini", encoding="utf-8")
+        self.config_last_read = now
+        return self.config
 
     def read_source_mode(self):
         try:
@@ -266,22 +281,6 @@ class Capture(threading.Thread):
         self.prev_detection_window_width = crop_width
         self.prev_detection_window_height = crop_height
         logger.info(f"[Capture] Detection ROI reloaded: {crop_width}x{crop_height} (center={self.screen_x_center},{self.screen_y_center})")
-
-    def center_crop(self, frame, target_width, target_height):
-        height, width = frame.shape[:2]
-
-        if width < target_width or height < target_height:
-            logger.warning(
-                "[Capture] frame is smaller than detection window; resizing "
-                f"{width}x{height} to {target_width}x{target_height}"
-            )
-            return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
-
-        left = max((width - target_width) // 2, 0)
-        top = max((height - target_height) // 2, 0)
-        right = left + target_width
-        bottom = top + target_height
-        return frame[top:bottom, left:right].copy()
 
     def reconnect_capture(self, force=False):
         now = time.monotonic()
