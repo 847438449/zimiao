@@ -83,12 +83,22 @@ class Config():
                 fallback=self.teammate_color_threshold,
             )
             self.resolution_scale_factor = self.config_Control_Filter.getfloat("resolution_scale_factor", fallback=1.0)
+            self.scale_adjustment_factor = self.config_Control_Filter.getfloat("scale_adjustment_factor", fallback=1.0)
+            self.active_target_category = self.config_Control_Filter.get("active_target_category", fallback="Category_A")
+            self.feature_convergence_strategy = self.config_Control_Filter.get("feature_convergence_strategy", fallback="strategy_first")
+            self.system_cooperative_filtering = self.config_Control_Filter.getboolean("system_cooperative_filtering", fallback=True)
+            self.processing_alpha = self.config_Control_Filter.getfloat("processing_alpha", fallback=0.35)
             self.current_res_mode = self.config_Control_Filter.get("current_res_mode", fallback="1080P OBS虚拟流 -> 2K 物理屏 (1.33x)")
             self.ema_alpha = self.config_Control_Filter.getfloat("ema_alpha", fallback=0.35)
         else:
             self.cooperative_filtering = self.config_Aim.getboolean("cooperative_filtering", fallback=False)
             self.tag_color_density_threshold = self.config_Aim.getfloat("tag_color_density_threshold", fallback=self.teammate_color_threshold)
             self.resolution_scale_factor = self.config_Aim.getfloat("resolution_scale_factor", fallback=1.0)
+            self.scale_adjustment_factor = self.config_Aim.getfloat("scale_adjustment_factor", fallback=1.0)
+            self.active_target_category = self.config_Aim.get("active_target_category", fallback="Category_A")
+            self.feature_convergence_strategy = self.config_Aim.get("feature_convergence_strategy", fallback="strategy_first")
+            self.system_cooperative_filtering = self.config_Aim.getboolean("system_cooperative_filtering", fallback=True)
+            self.processing_alpha = self.config_Aim.getfloat("processing_alpha", fallback=0.35)
             self.current_res_mode = self.config_Aim.get("current_res_mode", fallback="1080P OBS虚拟流 -> 2K 物理屏 (1.33x)")
             self.ema_alpha = self.config_Aim.getfloat("ema_alpha", fallback=0.35)
 

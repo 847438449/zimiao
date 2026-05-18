@@ -4,6 +4,7 @@ import numpy as np
 import random
 import time
 import cv2
+import configparser
 from typing import Sequence, Tuple
 
 from logic.hotkeys_watcher import hotkeys_watcher
@@ -160,6 +161,14 @@ class FrameParser:
     def __init__(self):
         self.arch = self.get_arch()
         self.dynamic_focus_parser = DynamicFocusParser(lock_duration=0.5)
+        self.config = configparser.ConfigParser()
+        self.reload_runtime_config()
+
+    def reload_runtime_config(self):
+        """Hot-read config.ini so UI profile changes affect the next frame."""
+        self.config.clear()
+        self.config.read("config.ini", encoding="utf-8")
+        return self.config
 
     def parse(self, result, current_frame=None):
         if isinstance(result, sv.Detections):
@@ -217,7 +226,72 @@ class FrameParser:
         if not classes_tensor.numel():
             return None
 
-        return self._find_nearest_target(boxes_array, classes_tensor)
+        return self.route_targets_by_environment_profile(boxes_array, classes_tensor)
+
+    def route_targets_by_environment_profile(self, boxes_array, classes_tensor):
+        """Apply the multi-stage profile router and return the final target."""
+        self.reload_runtime_config()
+        active_profile = self.config.get(
+            "Environment_Profile",
+            "current_profile",
+            fallback="profile_a",
+        ).strip().lower()
+
+        if active_profile == "profile_b":
+            selected_class = self.config.get(
+                "Control_Filter",
+                "active_target_category",
+                fallback="Category_A",
+            ).strip().upper()
+            strategy = self.config.get(
+                "Control_Filter",
+                "feature_convergence_strategy",
+                fallback="strategy_first",
+            ).strip().lower()
+
+            if selected_class == "CATEGORY_B":
+                primary_cls, secondary_cls = 3, 1
+            else:
+                primary_cls, secondary_cls = 2, 0
+
+            detection_rows = [
+                (boxes_array[idx], classes_tensor[idx])
+                for idx in range(int(classes_tensor.numel()))
+            ]
+            active_keypoints = [
+                row for row in detection_rows
+                if int(row[1].item()) == primary_cls
+            ]
+            active_centroids = [
+                row for row in detection_rows
+                if int(row[1].item()) == secondary_cls
+            ]
+
+            if strategy == "keypoint_only":
+                return self.get_closest_target(active_keypoints)
+            if strategy == "centroid_only":
+                return self.get_closest_target(active_centroids)
+
+            final_servo_target = self.get_closest_target(active_keypoints)
+            if final_servo_target is None:
+                final_servo_target = self.get_closest_target(active_centroids)
+            return final_servo_target
+
+        standard_pool = [
+            (boxes_array[idx], classes_tensor[idx])
+            for idx in range(int(classes_tensor.numel()))
+            if int(classes_tensor[idx].item()) == 0
+        ]
+        return self.get_closest_target(standard_pool)
+
+    def get_closest_target(self, detection_pool):
+        """Select the nearest candidate from a pre-filtered detection pool."""
+        if not detection_pool:
+            return None
+
+        boxes = torch.stack([row[0] for row in detection_pool]).to(self.arch)
+        classes = torch.stack([row[1] for row in detection_pool]).to(self.arch)
+        return self._find_nearest_target(boxes, classes)
 
     def _convert_sv_to_tensor(self, frame, current_frame=None):
         xyxy = np.asarray(frame.xyxy)

@@ -59,6 +59,17 @@ RES_MODE_ALIAS = {
     "2K 仿真源 -> 2K 物理屏 (1.0x)": RES_2K_TO_2K,
 }
 
+PROFILE_A_LABEL = "选项 A：通用轻量模式"
+PROFILE_B_LABEL = "选项 B：级联高精模式"
+PROFILE_CHOICES = [PROFILE_A_LABEL, PROFILE_B_LABEL]
+PROFILE_BY_LABEL = {
+    PROFILE_A_LABEL: "profile_a",
+    PROFILE_B_LABEL: "profile_b",
+}
+LABEL_BY_PROFILE = {profile: label for label, profile in PROFILE_BY_LABEL.items()}
+DEFAULT_MODEL_PATH_PROFILE_A = "F:/preset_assets/model_a.pt"
+DEFAULT_MODEL_PATH_PROFILE_B = "F:/preset_assets/model_b.pt"
+
 DEBUG_OPTIONS = {
     "显示渲染窗口 (show_window)": "show_window",
     "显示目标边界框 (show_boxes)": "show_boxes",
@@ -89,6 +100,10 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
         config.add_section("Mouse")
     if not config.has_section("AI"):
         config.add_section("AI")
+    if not config.has_section("Model"):
+        config.add_section("Model")
+    if not config.has_section("Environment_Profile"):
+        config.add_section("Environment_Profile")
     if not config.has_section("Debug window"):
         config.add_section("Debug window")
     if not config.has_section("Control_Filter"):
@@ -99,6 +114,8 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
     config.setdefault("Aim", {})
     config.setdefault("Mouse", {})
     config.setdefault("AI", {})
+    config.setdefault("Model", {})
+    config.setdefault("Environment_Profile", {})
     config.setdefault("Debug window", {})
     config.setdefault("Control_Filter", {})
 
@@ -135,15 +152,39 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
         config.set("Mouse", "udp_output", "False")
     if not config.has_option("AI", "AI_conf"):
         config.set("AI", "AI_conf", "0.2")
+    if not config.has_option("Environment_Profile", "current_profile"):
+        config.set("Environment_Profile", "current_profile", "profile_b")
+    if not config.has_option("Environment_Profile", "model_path_profile_a"):
+        config.set("Environment_Profile", "model_path_profile_a", DEFAULT_MODEL_PATH_PROFILE_A)
+    if not config.has_option("Environment_Profile", "model_path_profile_b"):
+        config.set("Environment_Profile", "model_path_profile_b", DEFAULT_MODEL_PATH_PROFILE_B)
+    if not config.has_option("Model", "model_path"):
+        current_profile = config.get("Environment_Profile", "current_profile", fallback="profile_b")
+        model_path_key = "model_path_profile_a" if current_profile == "profile_a" else "model_path_profile_b"
+        config.set(
+            "Model",
+            "model_path",
+            config.get("Environment_Profile", model_path_key, fallback=DEFAULT_MODEL_PATH_PROFILE_B),
+        )
     for option in DEBUG_OPTIONS.values():
         if not config.has_option("Debug window", option):
             config.set("Debug window", option, "True")
     if not config.has_option("Control_Filter", "cooperative_filtering"):
         config.set("Control_Filter", "cooperative_filtering", "True")
+    if not config.has_option("Control_Filter", "system_cooperative_filtering"):
+        config.set("Control_Filter", "system_cooperative_filtering", "True")
     if not config.has_option("Control_Filter", "tag_color_density_threshold"):
         config.set("Control_Filter", "tag_color_density_threshold", "0.10")
     if not config.has_option("Control_Filter", "resolution_scale_factor"):
         config.set("Control_Filter", "resolution_scale_factor", "1.3333")
+    if not config.has_option("Control_Filter", "scale_adjustment_factor"):
+        config.set("Control_Filter", "scale_adjustment_factor", "1.0")
+    if not config.has_option("Control_Filter", "active_target_category"):
+        config.set("Control_Filter", "active_target_category", "Category_A")
+    if not config.has_option("Control_Filter", "feature_convergence_strategy"):
+        config.set("Control_Filter", "feature_convergence_strategy", "strategy_first")
+    if not config.has_option("Control_Filter", "processing_alpha"):
+        config.set("Control_Filter", "processing_alpha", "0.35")
     if not config.has_option("Control_Filter", "current_res_mode"):
         config.set("Control_Filter", "current_res_mode", "1080P OBS虚拟流 -> 2K 物理屏 (1.33x)")
     if not config.has_option("Control_Filter", "ema_alpha"):
@@ -169,7 +210,9 @@ def load_config() -> dict[str, Any]:
     mode = config.get("Capture Methods", "source_mode", fallback="video").strip().lower()
     if mode not in LABEL_BY_MODE:
         mode = "video" if config.getboolean("Capture Methods", "simulation_mode", fallback=True) else "hardware"
+    current_profile = config.get("Environment_Profile", "current_profile", fallback="profile_b").strip().lower()
     return {
+        "environment_profile": LABEL_BY_PROFILE.get(current_profile, PROFILE_B_LABEL),
         "source": LABEL_BY_MODE[mode],
         "source_path": config.get("Capture Methods", "source_path", fallback=DEFAULT_SOURCE_PATH),
         "debug_options": [
@@ -231,6 +274,89 @@ def _upsert_config_values(updates: dict[str, dict[str, str]]) -> None:
                 output.append(f"{key} = {value}")
 
     CONFIG_PATH.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+
+
+def ensure_config_schema_on_disk() -> None:
+    """Materialize the new profile/filter schema without disturbing existing values."""
+    config = _new_parser()
+    _ensure_schema(config)
+
+    current_profile = config.get("Environment_Profile", "current_profile", fallback="profile_b").strip().lower()
+    if current_profile not in {"profile_a", "profile_b"}:
+        current_profile = "profile_b"
+
+    profile_a_path = config.get("Environment_Profile", "model_path_profile_a", fallback=DEFAULT_MODEL_PATH_PROFILE_A)
+    profile_b_path = config.get("Environment_Profile", "model_path_profile_b", fallback=DEFAULT_MODEL_PATH_PROFILE_B)
+    active_model_path = profile_a_path if current_profile == "profile_a" else profile_b_path
+
+    _upsert_config_values({
+        "Environment_Profile": {
+            "current_profile": current_profile,
+            "model_path_profile_a": profile_a_path,
+            "model_path_profile_b": profile_b_path,
+        },
+        "Model": {
+            "model_path": active_model_path,
+        },
+        "Control_Filter": {
+            "cooperative_filtering": config.get("Control_Filter", "cooperative_filtering", fallback="True"),
+            "tag_color_density_threshold": config.get("Control_Filter", "tag_color_density_threshold", fallback="0.10"),
+            "resolution_scale_factor": config.get("Control_Filter", "resolution_scale_factor", fallback="1"),
+            "current_res_mode": config.get("Control_Filter", "current_res_mode", fallback=RES_2K_TO_2K),
+            "ema_alpha": config.get("Control_Filter", "ema_alpha", fallback="0.35"),
+            "system_cooperative_filtering": config.get("Control_Filter", "system_cooperative_filtering", fallback="True"),
+            "scale_adjustment_factor": config.get("Control_Filter", "scale_adjustment_factor", fallback="1.0"),
+            "active_target_category": config.get("Control_Filter", "active_target_category", fallback="Category_A"),
+            "feature_convergence_strategy": config.get("Control_Filter", "feature_convergence_strategy", fallback="strategy_first"),
+            "processing_alpha": config.get("Control_Filter", "processing_alpha", fallback="0.35"),
+        },
+    })
+
+
+def apply_environment_profile(profile_label: str) -> str:
+    """Hot-persist the selected environment profile and its linked text fields."""
+    config = _new_parser()
+    _ensure_schema(config)
+
+    selected_profile = PROFILE_BY_LABEL.get(profile_label, "profile_b")
+    model_path_key = "model_path_profile_a" if selected_profile == "profile_a" else "model_path_profile_b"
+    model_path = config.get(
+        "Environment_Profile",
+        model_path_key,
+        fallback=DEFAULT_MODEL_PATH_PROFILE_A if selected_profile == "profile_a" else DEFAULT_MODEL_PATH_PROFILE_B,
+    )
+
+    updates: dict[str, dict[str, str]] = {
+        "Environment_Profile": {
+            "current_profile": selected_profile,
+            "model_path_profile_a": config.get("Environment_Profile", "model_path_profile_a", fallback=DEFAULT_MODEL_PATH_PROFILE_A),
+            "model_path_profile_b": config.get("Environment_Profile", "model_path_profile_b", fallback=DEFAULT_MODEL_PATH_PROFILE_B),
+        },
+        "Model": {"model_path": model_path},
+    }
+
+    if selected_profile == "profile_b":
+        updates["Control_Filter"] = {
+            "active_target_category": "Category_A",
+            "feature_convergence_strategy": "strategy_first",
+        }
+
+    _upsert_config_values(updates)
+
+    config_after = _new_parser()
+    msg = (
+        "✅ 运行环境预设已热落盘｜"
+        f"current_profile={config_after.get('Environment_Profile', 'current_profile', fallback='')}, "
+        f"model_path={config_after.get('Model', 'model_path', fallback='')}"
+    )
+    if selected_profile == "profile_b":
+        msg += (
+            ", active_target_category="
+            f"{config_after.get('Control_Filter', 'active_target_category', fallback='')}, "
+            "feature_convergence_strategy="
+            f"{config_after.get('Control_Filter', 'feature_convergence_strategy', fallback='')}"
+        )
+    return msg
 
 
 def write_config(
@@ -423,11 +549,18 @@ def terminate_pipeline() -> str:
 
 
 def build_ui() -> gr.Blocks:
+    ensure_config_schema_on_disk()
     defaults = load_config()
 
     with gr.Blocks(title="YOLOv8 Dashboard Launcher") as demo:
         gr.Markdown("# YOLOv8 Realtime Detection Dashboard", elem_id="title")
         gr.Markdown("轻量级参数固化、双源切换与核心推理进程生命周期管理", elem_id="subtitle")
+
+        environment_profile = gr.Radio(
+            choices=PROFILE_CHOICES,
+            value=defaults["environment_profile"],
+            label="🎯 运行环境全局预设 (Target Environment Profile)",
+        )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -478,6 +611,8 @@ def build_ui() -> gr.Blocks:
         inputs = [source, source_path, debug_options, cooperative_filtering, resolution_mode, ai_conf, head_ratio, sensitivity]
         for component in inputs:
             component.change(write_config, inputs=inputs, outputs=status, show_progress=False)
+
+        environment_profile.change(apply_environment_profile, inputs=environment_profile, outputs=status, show_progress=False)
 
         start_btn.click(start_pipeline, inputs=inputs, outputs=status, show_progress=True).then(
             read_pipeline_log,

@@ -104,8 +104,9 @@ class Capture(threading.Thread):
         self.static_frame = None
         self.source_mode = "obs"
         self.simulation_mode = False
+        # Force DirectShow to bypass OpenCV's obsensor auto-probe path.
         camera_index = self.read_obs_camera_index()
-        self.cap = cv2.VideoCapture(int(camera_index))
+        self.cap = cv2.VideoCapture(int(camera_index), cv2.CAP_DSHOW)
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.cap.set(cv2.CAP_PROP_FPS, self.USB_CAPTURE_FPS)
 

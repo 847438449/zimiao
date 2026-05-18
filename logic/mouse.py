@@ -132,10 +132,10 @@ class MouseThread:
 
     def read_current_source_mode(self):
         try:
-            mode = self.read_runtime_config().get("Capture Methods", "source_mode", fallback=getattr(cfg, "source_mode", "video"))
-            return mode.strip().lower()
+            current_source_mode = self.read_runtime_config().get("Capture Methods", "source_mode", fallback=getattr(cfg, "source_mode", "obs"))
+            return current_source_mode.strip().lower()
         except Exception:
-            return getattr(cfg, "source_mode", "video")
+            return getattr(cfg, "source_mode", "obs")
 
     def read_ema_alpha(self):
         try:
@@ -186,18 +186,20 @@ class MouseThread:
         self.section_size_y = self.screen_height / 100
         logger.info(f"[Mouse Stream] Geometry reloaded: ROI={screen_width}x{screen_height} center=({self.center_x:.1f},{self.center_y:.1f})")
 
-    def read_resolution_scale_factor(self):
-        """Read the latest resolution scale from config.ini for hot UI switching."""
+    def read_scale_adjustment_factor(self):
+        """Read the latest abstract gain factor from config.ini for hot UI switching."""
         try:
             parser = self.read_runtime_config()
-            return parser.getfloat("Control_Filter", "resolution_scale_factor", fallback=1.0)
+            return parser.getfloat("Control_Filter", "scale_adjustment_factor", fallback=1.0)
         except Exception:
-            return float(getattr(cfg, "resolution_scale_factor", 1.0))
+            return float(getattr(cfg, "scale_adjustment_factor", 1.0))
 
     def apply_resolution_scale(self, dx, dy):
-        """Apply physical-resolution gain compensation to final control deltas."""
-        scale_factor = self.read_resolution_scale_factor()
-        return dx * scale_factor, dy * scale_factor, scale_factor
+        """Apply profile-level gain compensation to smoothed deltas."""
+        scale_factor = self.read_scale_adjustment_factor()
+        scaled_dx = dx * scale_factor
+        scaled_dy = dy * scale_factor
+        return scaled_dx, scaled_dy, scale_factor
 
     def log_mouse_stream(self, dx, dy, target_cls, random_multiplier=None, scale_factor=None):
         """Print the high-frequency virtual mouse offset stream for debugging."""
@@ -362,9 +364,17 @@ class MouseThread:
             self.local_move(dx, dy)
         else:
             self.current_aim_mode = "KMBOX_UDP"
-            self.send_udp_offset(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
+            self.send_udp_packet(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
 
         self.log_mouse_stream(dx, dy, target_cls, random_multiplier=random_multiplier, scale_factor=scale_factor)
+
+    def send_udp_packet(self, dx, dy, target_x=None, target_y=None, target_w=None, target_h=None, target_cls=None, shooting_state=False):
+        """Send the final control vector through the network packet bus."""
+        target_x = 0.0 if target_x is None else target_x
+        target_y = 0.0 if target_y is None else target_y
+        target_w = 0.0 if target_w is None else target_w
+        target_h = 0.0 if target_h is None else target_h
+        self.send_udp_offset(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
 
     def send_udp_offset(self, dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state):
         self.ensure_udp_socket()
