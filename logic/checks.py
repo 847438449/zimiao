@@ -1,5 +1,6 @@
 import torch
 import os
+from pathlib import Path
 
 from logic.config_watcher import cfg
 from logic.logger import logger
@@ -86,7 +87,10 @@ def run_checks():
         
     logger.info("Capture method: USB capture card via OpenCV VideoCapture(1)")
 
-    if not os.path.exists(f"models/{cfg.AI_model_name}"):
+    model_path = Path("models") / cfg.AI_model_name
+    if not model_path.exists():
+        model_path = Path(cfg.AI_model_name)
+    if not model_path.exists():
         logger.error(f"The AI model {cfg.AI_model_name} has not been found! Check the correctness of the model name in the AI_model_name option.")
         quit()
     

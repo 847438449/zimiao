@@ -236,7 +236,19 @@ class FrameParser:
         distances_sq = torch.sum((boxes_array[:, :2] - center) ** 2, dim=1)
         weights = torch.ones_like(distances_sq)
 
-        if cfg.disable_headshot:
+        class01_mask = (classes_tensor == 0) | (classes_tensor == 1)
+        if class01_mask.any():
+            # head_shot_ratio is exposed in launcher_ui.py as a runtime tuning knob.
+            # Higher values favor Class 0; lower values favor Class 1 while distance
+            # to the capture center remains the primary ranking signal.
+            ratio = max(0.0, min(1.0, float(getattr(cfg, "head_shot_ratio", 0.3))))
+            class_weights = torch.ones_like(distances_sq)
+            class_weights[classes_tensor == 0] *= 1.0 - 0.5 * ratio
+            class_weights[classes_tensor == 1] *= 1.0 - 0.5 * (1.0 - ratio)
+            weighted_distances = distances_sq * class_weights
+            nearest_idx = torch.argmin(weighted_distances[class01_mask])
+            nearest_idx = torch.nonzero(class01_mask)[nearest_idx].item()
+        elif cfg.disable_headshot:
             non_head_mask = classes_tensor != 7
             weights = torch.ones_like(classes_tensor)
             weights[classes_tensor == 7] *= 0.5

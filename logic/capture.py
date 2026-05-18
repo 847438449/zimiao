@@ -9,6 +9,7 @@ from logic.logger import logger
 
 
 class Capture(threading.Thread):
+    DEFAULT_SIMULATION_VIDEO_PATH = r"F:\yolo_training\game_test.mp4"
     USB_CAPTURE_INDEX = 1
     USB_CAPTURE_WIDTH = 1920
     USB_CAPTURE_HEIGHT = 1080
@@ -31,14 +32,45 @@ class Capture(threading.Thread):
         self.running = True
         self.cap = None
         self.last_reconnect_attempt = 0.0
+        self.simulation_mode = cfg.simulation_mode
 
-        self.setup_usb_capture()
+        self.setup_capture()
+
+    def setup_capture(self):
+        if cfg.simulation_mode:
+            return self.setup_simulation_capture()
+        return self.setup_usb_capture()
+
+    def setup_simulation_capture(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+        self.simulation_mode = True
+        video_path = getattr(cfg, "simulation_video_path", self.DEFAULT_SIMULATION_VIDEO_PATH)
+        self.cap = cv2.VideoCapture(video_path)
+
+        if not self.cap.isOpened():
+            logger.error(f"[Capture] Simulation video could not be opened: {video_path}")
+            return False
+
+        total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        logger.info(
+            "[Capture] Simulation video initialized "
+            f"(path={video_path}, frames={total_frames}, "
+            f"actual={actual_width}x{actual_height}@{actual_fps:.2f})"
+        )
+        return True
 
     def setup_usb_capture(self):
         if self.cap is not None:
             self.cap.release()
             self.cap = None
 
+        self.simulation_mode = False
         self.cap = cv2.VideoCapture(self.USB_CAPTURE_INDEX)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.USB_CAPTURE_WIDTH)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.USB_CAPTURE_HEIGHT)
@@ -84,16 +116,26 @@ class Capture(threading.Thread):
         try:
             ret, frame = self.cap.read()
         except Exception as e:
-            logger.error(f"[Capture] USB frame read exception: {e}")
+            logger.error(f"[Capture] frame read exception: {e}")
             self.reconnect_capture(force=True)
             return None
 
-        if not ret or frame is None:
-            logger.warning("[Capture] USB frame read failed, reconnecting capture card")
+        if ret and frame is not None:
+            return self.prepare_frame(frame)
+
+        if self.simulation_mode:
+            logger.info("[Capture] Simulation video reached EOF; rewinding to frame 0")
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = self.cap.read()
+            if ret and frame is not None:
+                return self.prepare_frame(frame)
+            logger.warning("[Capture] Simulation rewind failed, reconnecting video source")
             self.reconnect_capture(force=True)
             return None
 
-        return self.prepare_frame(frame)
+        logger.warning("[Capture] USB frame read failed, reconnecting capture card")
+        self.reconnect_capture(force=True)
+        return None
 
     def prepare_frame(self, frame):
         if frame.ndim == 2:
@@ -108,7 +150,7 @@ class Capture(threading.Thread):
 
         if width < target_width or height < target_height:
             logger.warning(
-                "[Capture] USB frame is smaller than detection window; resizing "
+                "[Capture] frame is smaller than detection window; resizing "
                 f"{width}x{height} to {target_width}x{target_height}"
             )
             return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
@@ -127,7 +169,7 @@ class Capture(threading.Thread):
         self.last_reconnect_attempt = now
         self.release_capture()
         time.sleep(0.2)
-        self.setup_usb_capture()
+        self.setup_capture()
 
     def release_capture(self):
         if self.cap is not None:
@@ -151,7 +193,7 @@ class Capture(threading.Thread):
             self.prev_detection_window_height = cfg.detection_window_height
 
         self.reconnect_capture(force=True)
-        logger.info("[Capture] USB capture reloaded")
+        logger.info("[Capture] capture source reloaded")
 
     def print_startup_messages(self):
         version = 0

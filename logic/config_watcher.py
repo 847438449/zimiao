@@ -28,6 +28,11 @@ class Config():
         # Capture Global
         self.config_Capture_Global = self.config["Capture Methods"]
         self.capture_fps = int(self.config_Capture_Global["capture_fps"])
+        self.simulation_mode = self.config_Capture_Global.getboolean("simulation_mode", fallback=True)
+        self.simulation_video_path = self.config_Capture_Global.get(
+            "simulation_video_path",
+            fallback=r"F:\yolo_training\game_test.mp4",
+        )
 
         # Capture Method Bettercam
         self.config_Bettercam_Capture = self.config["Capture Methods"]
@@ -47,6 +52,7 @@ class Config():
         # Aim
         self.config_Aim = self.config["Aim"]
         self.body_y_offset = float(self.config_Aim["body_y_offset"])
+        self.head_shot_ratio = self.config_Aim.getfloat("head_shot_ratio", fallback=0.3)
         self.hideout_targets = self.config_Aim.getboolean("hideout_targets")
         self.disable_headshot = self.config_Aim.getboolean("disable_headshot")
         self.disable_prediction = self.config_Aim.getboolean("disable_prediction")

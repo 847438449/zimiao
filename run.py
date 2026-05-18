@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from pathlib import Path
+
 from ultralytics import YOLO
 import torch
 
@@ -49,7 +53,10 @@ def init():
     run_checks()
     
     try:
-        model = YOLO(f"models/{cfg.AI_model_name}", task="detect")
+        model_path = Path("models") / cfg.AI_model_name
+        if not model_path.exists():
+            model_path = Path(cfg.AI_model_name)
+        model = YOLO(str(model_path), task="detect")
     except Exception as e:
         print("An error occurred when loading the AI model:\n", e)
         quit(0)
