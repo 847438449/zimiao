@@ -3,6 +3,7 @@ import time
 import math
 import os
 import json
+import random
 import socket
 import sys
 import supervision as sv
@@ -104,7 +105,11 @@ class MouseThread:
         shooting.queue.put((self.bScope, shooting_state))
 
         self.current_aim_mode = "UDP" if self.udp_output else "MOVE"
-        self.log_mouse_stream(dx, dy, target_cls)
+        random_multiplier = None
+        if self.udp_output:
+            dx, dy, random_multiplier = self.apply_udp_random_multiplier(dx, dy)
+
+        self.log_mouse_stream(dx, dy, target_cls, random_multiplier=random_multiplier)
 
         if self.udp_output:
             self.send_udp_offset(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
@@ -113,7 +118,17 @@ class MouseThread:
         move_x, move_y = self.calc_movement(target_x, target_y, target_cls)
         self.move_mouse(move_x, move_y, shooting_state=shooting_state)
 
-    def log_mouse_stream(self, dx, dy, target_cls):
+    def apply_udp_random_multiplier(self, dx, dy):
+        """Inject per-frame random resistance into UDP virtual mouse offsets."""
+        min_mult = float(getattr(cfg, "mouse_min_speed_multiplier", self.min_speed_multiplier))
+        max_mult = float(getattr(cfg, "mouse_max_speed_multiplier", self.max_speed_multiplier))
+        if min_mult > max_mult:
+            min_mult, max_mult = max_mult, min_mult
+
+        current_random_multiplier = random.uniform(min_mult, max_mult)
+        return dx * current_random_multiplier, dy * current_random_multiplier, current_random_multiplier
+
+    def log_mouse_stream(self, dx, dy, target_cls, random_multiplier=None):
         """Print the high-frequency virtual mouse offset stream for debugging."""
         if target_cls is None:
             cls_str = "❔ UNKNOWN"
@@ -126,10 +141,12 @@ class MouseThread:
             else:
                 cls_str = f"CLS {target_cls}"
 
+        rand_part = "" if random_multiplier is None else f" | Rand: {float(random_multiplier):.3f}"
         message = (
             f"[Mouse Stream] Target: {cls_str:<10} | "
             f"dx: {float(dx):+6.1f} | dy: {float(dy):+6.1f} | "
             f"Mode: {self.current_aim_mode:<4}"
+            f"{rand_part}"
         )
         try:
             print(message, flush=True)
