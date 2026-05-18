@@ -2,6 +2,8 @@ import win32con, win32api
 import time
 import math
 import os
+import json
+import socket
 import supervision as sv
 
 from logic.config_watcher import cfg
@@ -45,6 +47,12 @@ class MouseThread:
         self.arch = self.get_arch()
         self.section_size_x = self.screen_width / 100
         self.section_size_y = self.screen_height / 100
+        self.udp_output = cfg.udp_output
+        self.udp_host = cfg.udp_host
+        self.udp_port = cfg.udp_port
+        self.udp_send_when_key_pressed_only = cfg.udp_send_when_key_pressed_only
+        self.udp_send_json = cfg.udp_send_json
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if self.udp_output else None
 
     def get_arch(self):
         if cfg.AI_enable_AMD:
@@ -82,11 +90,19 @@ class MouseThread:
                 target_x, target_y = self.predict_target_position(target_x, target_y, current_time)
             self.visualize_prediction(target_x, target_y, target_cls)
 
-        move_x, move_y = self.calc_movement(target_x, target_y, target_cls)
-        
+        dx = target_x - self.center_x
+        dy = target_y - self.center_y
+        shooting_state = self.get_shooting_key_state()
+
         self.visualize_history(target_x, target_y)
-        shooting.queue.put((self.bScope, self.get_shooting_key_state()))
-        self.move_mouse(move_x, move_y)
+        shooting.queue.put((self.bScope, shooting_state))
+
+        if self.udp_output:
+            self.send_udp_offset(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
+            return
+
+        move_x, move_y = self.calc_movement(target_x, target_y, target_cls)
+        self.move_mouse(move_x, move_y, shooting_state=shooting_state)
 
     def predict_target_position(self, target_x, target_y, current_time):
         # First target
@@ -97,7 +113,7 @@ class MouseThread:
             self.prev_velocity_x = 0
             self.prev_velocity_y = 0
             return target_x, target_y
-        
+
         # Next target?
         max_jump = max(self.screen_width, self.screen_height) * 0.3 # 30%
         if abs(target_x - self.prev_x) > max_jump or abs(target_y - self.prev_y) > max_jump:
@@ -108,10 +124,10 @@ class MouseThread:
             return target_x, target_y
 
         delta_time = current_time - self.prev_time
-        
+
         if delta_time == 0:
             delta_time = 1e-6
-    
+
         velocity_x = (target_x - self.prev_x) / delta_time
         velocity_y = (target_y - self.prev_y) / delta_time
         acceleration_x = (velocity_x - self.prev_velocity_x) / delta_time
@@ -136,18 +152,18 @@ class MouseThread:
     def calculate_speed_multiplier(self, target_x, target_y, distance):
         if any(map(math.isnan, (target_x, target_y))) or self.section_size_x == 0:
             return self.min_speed_multiplier
-    
+
         normalized_distance = min(distance / self.max_distance, 1)
         base_speed = self.min_speed_multiplier + (self.max_speed_multiplier - self.min_speed_multiplier) * (1 - normalized_distance)
-        
+
         if self.section_size_x == 0:
             return self.min_speed_multiplier
 
         target_x_section = int((target_x - self.center_x + self.screen_width / 2) / self.section_size_x)
         target_y_section = int((target_y - self.center_y + self.screen_height / 2) / self.section_size_y)
-        
+
         distance_from_center = max(abs(50 - target_x_section), abs(50 - target_y_section))
-        
+
         if distance_from_center == 0:
             return 1
         elif 5 <= distance_from_center <= 10:
@@ -159,7 +175,7 @@ class MouseThread:
         if self.prev_distance is not None:
             speed_adjustment = 1 + (abs(distance - self.prev_distance) / self.max_distance) * self.speed_correction_factor
             return speed_multiplier * speed_adjustment
-        
+
         return speed_multiplier
 
     def calc_movement(self, target_x, target_y, target_cls):
@@ -178,10 +194,10 @@ class MouseThread:
         alpha = 0.85
         if not hasattr(self, 'last_move_x'):
             self.last_move_x, self.last_move_y = 0, 0
-        
+
         move_x = alpha * mouse_move_x + (1 - alpha) * self.last_move_x
         move_y = alpha * mouse_move_y + (1 - alpha) * self.last_move_y
-        
+
         self.last_move_x, self.last_move_y = move_x, move_y
 
         move_x = (move_x / 360) * (self.dpi * (1 / self.mouse_sensitivity)) * speed_multiplier
@@ -189,11 +205,41 @@ class MouseThread:
 
         return move_x, move_y
 
-    def move_mouse(self, x, y):
+    def send_udp_offset(self, dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state):
+        if self.udp_socket is None:
+            return
+
+        if self.udp_send_when_key_pressed_only and not shooting_state:
+            return
+
+        if self.udp_send_json:
+            payload = {
+                "dx": float(dx),
+                "dy": float(dy),
+                "target_x": float(target_x),
+                "target_y": float(target_y),
+                "target_w": float(target_w),
+                "target_h": float(target_h),
+                "target_cls": None if target_cls is None else int(target_cls),
+                "b_scope": bool(self.bScope),
+                "shooting_key": bool(shooting_state),
+                "timestamp": time.time(),
+            }
+            message = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        else:
+            message = f"{float(dx):.3f},{float(dy):.3f}".encode("ascii")
+
+        try:
+            self.udp_socket.sendto(message, (self.udp_host, self.udp_port))
+        except OSError as e:
+            logger.error(f"UDP send failed: {e}")
+
+    def move_mouse(self, x, y, shooting_state=None):
         if x == 0 and y == 0:
             return
 
-        shooting_state = self.get_shooting_key_state()
+        if shooting_state is None:
+            shooting_state = self.get_shooting_key_state()
 
         if shooting_state or cfg.mouse_auto_aim:
             if not cfg.mouse_ghub and not cfg.arduino_move and not cfg.mouse_rzr:
@@ -216,10 +262,10 @@ class MouseThread:
         reduced_w, reduced_h = target_w * reduction_factor / 2, target_h * reduction_factor / 2
         x1, x2, y1, y2 = target_x - reduced_w, target_x + reduced_w, target_y - reduced_h, target_y + reduced_h
         bScope = self.center_x > x1 and self.center_x < x2 and self.center_y > y1 and self.center_y < y2
-        
+
         if cfg.show_window and cfg.show_bScope_box:
             visuals.draw_bScope(x1, x2, y1, y2, bScope)
-        
+
         return bScope
 
     def update_settings(self):
@@ -234,6 +280,16 @@ class MouseThread:
         self.screen_height = cfg.detection_window_height
         self.center_x = self.screen_width / 2
         self.center_y = self.screen_height / 2
+        self.udp_output = cfg.udp_output
+        self.udp_host = cfg.udp_host
+        self.udp_port = cfg.udp_port
+        self.udp_send_when_key_pressed_only = cfg.udp_send_when_key_pressed_only
+        self.udp_send_json = cfg.udp_send_json
+        if self.udp_output and self.udp_socket is None:
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        elif not self.udp_output and self.udp_socket is not None:
+            self.udp_socket.close()
+            self.udp_socket = None
 
     def visualize_target(self, target_x, target_y, target_cls):
         if (cfg.show_window and cfg.show_target_line) or (cfg.show_overlay and cfg.show_target_line):

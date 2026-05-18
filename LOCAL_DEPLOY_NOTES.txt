@@ -1,0 +1,22 @@
+Sunone Aimbot local deployment notes
+
+Location:
+  F:\sunone_aimbot
+
+Prepared:
+  - Repository cloned from https://github.com/SunOner/sunone_aimbot
+  - Python 3.12 virtual environment created at F:\sunone_aimbot\.venv
+  - requirements.txt installed into the local virtual environment
+  - streamlit installed for the helper UI
+  - run_ai.bat and run_helper.bat updated to use the local virtual environment
+
+Useful commands:
+  setup_local.bat      Recreate/update the local environment and run import checks
+  run_helper.bat       Open the Streamlit configuration helper
+  run_ai.bat           Start the project with run.py
+  .venv\Scripts\python.exe check_env.py   Verify Python/package imports
+
+Notes:
+  - This project targets Windows 10/11 and Python 3.12.
+  - README warns game account bans are possible; use at your own risk.
+  - Default config uses AI_device = 0, so a compatible GPU/CUDA setup is expected for normal use.

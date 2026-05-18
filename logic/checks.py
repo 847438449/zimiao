@@ -84,13 +84,7 @@ def run_checks():
             "Don't forget your CUDA version (Minimum version is 12.1).")
         quit()
         
-    if + cfg.mss_capture + cfg.Bettercam_capture + cfg.Obs_capture < 1:
-        logger.error("Use at least one image capture method.\nSet the value to `True` in the `bettercam_capture` option or in the `obs_capture` option or in the `mss_capture` option.")
-        quit()
-        
-    if  cfg.mss_capture + cfg.Bettercam_capture + cfg.Obs_capture > 1:
-        logger.error("Only one capture method is possible.\nSet the value to `True` in the `bettercam_capture` option or in the `obs_capture` option or in the `mss_capture` option.")
-        quit()
+    logger.info("Capture method: USB capture card via OpenCV VideoCapture(1)")
 
     if not os.path.exists(f"models/{cfg.AI_model_name}"):
         logger.error(f"The AI model {cfg.AI_model_name} has not been found! Check the correctness of the model name in the AI_model_name option.")
