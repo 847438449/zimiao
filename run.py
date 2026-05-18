@@ -74,7 +74,7 @@ def init():
             result = perform_detection(model, image, tracker)
 
             if hotkeys_watcher.app_pause == 0:
-                frameParser.parse(result)
+                frameParser.parse(result, current_frame=image)
 
 if __name__ == "__main__":
     init()

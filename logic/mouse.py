@@ -2,6 +2,7 @@ import win32con, win32api
 import time
 import math
 import os
+import configparser
 import json
 import random
 import socket
@@ -97,6 +98,7 @@ class MouseThread:
                 target_x, target_y = self.predict_target_position(target_x, target_y, current_time)
             self.visualize_prediction(target_x, target_y, target_cls)
 
+        self.refresh_geometry_from_config()
         dx = target_x - self.center_x
         dy = target_y - self.center_y
         shooting_state = self.get_shooting_key_state()
@@ -109,7 +111,9 @@ class MouseThread:
         if self.udp_output:
             dx, dy, random_multiplier = self.apply_udp_random_multiplier(dx, dy)
 
-        self.log_mouse_stream(dx, dy, target_cls, random_multiplier=random_multiplier)
+        dx, dy, scale_factor = self.apply_resolution_scale(dx, dy)
+
+        self.log_mouse_stream(dx, dy, target_cls, random_multiplier=random_multiplier, scale_factor=scale_factor)
 
         if self.udp_output:
             self.send_udp_offset(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
@@ -128,7 +132,43 @@ class MouseThread:
         current_random_multiplier = random.uniform(min_mult, max_mult)
         return dx * current_random_multiplier, dy * current_random_multiplier, current_random_multiplier
 
-    def log_mouse_stream(self, dx, dy, target_cls, random_multiplier=None):
+    def refresh_geometry_from_config(self):
+        """Hot-read ROI dimensions so center math tracks 320/448 UI switches."""
+        try:
+            parser = configparser.ConfigParser()
+            parser.read("config.ini", encoding="utf-8")
+            screen_width = parser.getint("Detection window", "detection_window_width", fallback=int(self.screen_width))
+            screen_height = parser.getint("Detection window", "detection_window_height", fallback=int(self.screen_height))
+        except Exception:
+            return
+
+        if screen_width == self.screen_width and screen_height == self.screen_height:
+            return
+
+        self.screen_width = screen_width
+        self.screen_height = screen_height
+        self.center_x = self.screen_width / 2
+        self.center_y = self.screen_height / 2
+        self.max_distance = math.sqrt(self.screen_width**2 + self.screen_height**2) / 2
+        self.section_size_x = self.screen_width / 100
+        self.section_size_y = self.screen_height / 100
+        logger.info(f"[Mouse Stream] Geometry reloaded: ROI={screen_width}x{screen_height} center=({self.center_x:.1f},{self.center_y:.1f})")
+
+    def read_resolution_scale_factor(self):
+        """Read the latest resolution scale from config.ini for hot UI switching."""
+        try:
+            parser = configparser.ConfigParser()
+            parser.read("config.ini", encoding="utf-8")
+            return parser.getfloat("Control_Filter", "resolution_scale_factor", fallback=1.0)
+        except Exception:
+            return float(getattr(cfg, "resolution_scale_factor", 1.0))
+
+    def apply_resolution_scale(self, dx, dy):
+        """Apply physical-resolution gain compensation to final control deltas."""
+        scale_factor = self.read_resolution_scale_factor()
+        return dx * scale_factor, dy * scale_factor, scale_factor
+
+    def log_mouse_stream(self, dx, dy, target_cls, random_multiplier=None, scale_factor=None):
         """Print the high-frequency virtual mouse offset stream for debugging."""
         if target_cls is None:
             cls_str = "❔ UNKNOWN"
@@ -142,11 +182,13 @@ class MouseThread:
                 cls_str = f"CLS {target_cls}"
 
         rand_part = "" if random_multiplier is None else f" | Rand: {float(random_multiplier):.3f}"
+        scale_part = "" if scale_factor is None else f" | Scale: {float(scale_factor):.4g}"
         message = (
             f"[Mouse Stream] Target: {cls_str:<10} | "
             f"dx: {float(dx):+6.1f} | dy: {float(dy):+6.1f} | "
             f"Mode: {self.current_aim_mode:<4}"
             f"{rand_part}"
+            f"{scale_part}"
         )
         try:
             print(message, flush=True)

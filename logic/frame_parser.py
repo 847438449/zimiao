@@ -3,6 +3,7 @@ import supervision as sv
 import numpy as np
 import random
 import time
+import cv2
 from typing import Sequence, Tuple
 
 from logic.hotkeys_watcher import hotkeys_watcher
@@ -160,26 +161,26 @@ class FrameParser:
         self.arch = self.get_arch()
         self.dynamic_focus_parser = DynamicFocusParser(lock_duration=0.5)
 
-    def parse(self, result):
+    def parse(self, result, current_frame=None):
         if isinstance(result, sv.Detections):
-            self._process_sv_detections(result)
+            self._process_sv_detections(result, current_frame=current_frame)
         else:
-            self._process_yolo_detections(result)
+            self._process_yolo_detections(result, current_frame=current_frame)
 
-    def _process_sv_detections(self, detections):
+    def _process_sv_detections(self, detections, current_frame=None):
         if detections.xyxy.any():
             visuals.draw_helpers(detections)
-            target = self.sort_targets(detections)
+            target = self.sort_targets(detections, current_frame=current_frame)
             self._handle_target(target)
         else:
             visuals.clear()
             if cfg.auto_shoot or cfg.triggerbot:
                 shooting.shoot(False, False)
 
-    def _process_yolo_detections(self, results):
+    def _process_yolo_detections(self, results, current_frame=None):
         for frame in results:
             if frame.boxes:
-                target = self.sort_targets(frame)
+                target = self.sort_targets(frame, current_frame=current_frame)
                 self._handle_target(target)
                 self._visualize_frame(frame)
 
@@ -207,20 +208,28 @@ class FrameParser:
             if not frame.boxes:
                 visuals.clear()
 
-    def sort_targets(self, frame):
+    def sort_targets(self, frame, current_frame=None):
         if isinstance(frame, sv.Detections):
-            boxes_array, classes_tensor = self._convert_sv_to_tensor(frame)
+            boxes_array, classes_tensor = self._convert_sv_to_tensor(frame, current_frame=current_frame)
         else:
-            boxes_array = frame.boxes.xywh.to(self.arch)
-            classes_tensor = frame.boxes.cls.to(self.arch)
+            boxes_array, classes_tensor = self._convert_yolo_to_tensor(frame, current_frame=current_frame)
 
         if not classes_tensor.numel():
             return None
 
         return self._find_nearest_target(boxes_array, classes_tensor)
 
-    def _convert_sv_to_tensor(self, frame):
-        xyxy = frame.xyxy
+    def _convert_sv_to_tensor(self, frame, current_frame=None):
+        xyxy = np.asarray(frame.xyxy)
+        class_ids = np.array(frame.class_id if frame.class_id is not None else [], dtype=np.float32)
+        xyxy, class_ids = self._filter_cooperative_candidates(current_frame, xyxy, class_ids)
+
+        if xyxy.size == 0 or class_ids.size == 0:
+            return (
+                torch.empty((0, 4), dtype=torch.float32, device=self.arch),
+                torch.empty((0,), dtype=torch.float32, device=self.arch),
+            )
+
         xywh = torch.tensor([
             (xyxy[:, 0] + xyxy[:, 2]) / 2,
             (xyxy[:, 1] + xyxy[:, 3]) / 2,
@@ -228,8 +237,97 @@ class FrameParser:
             xyxy[:, 3] - xyxy[:, 1]
         ], dtype=torch.float32).to(self.arch).T
 
-        classes_tensor = torch.from_numpy(np.array(frame.class_id, dtype=np.float32)).to(self.arch)
+        classes_tensor = torch.from_numpy(class_ids.astype(np.float32)).to(self.arch)
         return xywh, classes_tensor
+
+    def _convert_yolo_to_tensor(self, frame, current_frame=None):
+        xyxy = frame.boxes.xyxy.detach().cpu().numpy()
+        class_ids = frame.boxes.cls.detach().cpu().numpy().astype(np.float32)
+        xyxy, class_ids = self._filter_cooperative_candidates(current_frame, xyxy, class_ids)
+
+        if xyxy.size == 0 or class_ids.size == 0:
+            return (
+                torch.empty((0, 4), dtype=torch.float32, device=self.arch),
+                torch.empty((0,), dtype=torch.float32, device=self.arch),
+            )
+
+        xywh = torch.tensor([
+            (xyxy[:, 0] + xyxy[:, 2]) / 2,
+            (xyxy[:, 1] + xyxy[:, 3]) / 2,
+            xyxy[:, 2] - xyxy[:, 0],
+            xyxy[:, 3] - xyxy[:, 1]
+        ], dtype=torch.float32).to(self.arch).T
+        classes_tensor = torch.from_numpy(class_ids.astype(np.float32)).to(self.arch)
+        return xywh, classes_tensor
+
+    def _filter_cooperative_candidates(self, current_frame, xyxy, class_ids):
+        if not getattr(cfg, "cooperative_filtering", False) or current_frame is None or xyxy.size == 0:
+            return xyxy, class_ids
+
+        keep_indices = []
+        for idx, box_xyxy in enumerate(xyxy):
+            if self.validate_cooperative_entity(current_frame, box_xyxy):
+                print(
+                    "[Mouse Stream] Target: 🛡️ COOP | "
+                    "识别到协同保护目标，当前控制回路执行非合作化清洗 | Mode: SKIP",
+                    flush=True,
+                )
+                continue
+            keep_indices.append(idx)
+
+        if not keep_indices:
+            return np.empty((0, 4), dtype=np.float32), np.empty((0,), dtype=np.float32)
+
+        return xyxy[keep_indices], class_ids[keep_indices]
+
+    def validate_cooperative_entity(self, frame, bounding_box, roi_offset_height=30):
+        """
+        Detect active cooperative color tags in an ROI above the target box.
+
+        Returns True when high-saturation green/blue UI tag pixels exceed the
+        configured density threshold, causing the control loop to skip target.
+        """
+        try:
+            if frame is None:
+                return False
+
+            if hasattr(bounding_box, "xyxy"):
+                xyxy = bounding_box.xyxy[0].detach().cpu().numpy()
+            else:
+                xyxy = np.asarray(bounding_box, dtype=np.float32)
+
+            x1, y1, x2, y2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
+            height, width = frame.shape[:2]
+            x1 = max(0, min(width, x1))
+            x2 = max(0, min(width, x2))
+            y1 = max(0, min(height, y1))
+
+            roi_y1 = max(0, y1 - roi_offset_height)
+            roi_y2 = y1
+
+            if roi_y2 <= roi_y1 or x2 <= x1:
+                return False
+
+            feature_roi = frame[roi_y1:roi_y2, x1:x2]
+            total_pixels = feature_roi.shape[0] * feature_roi.shape[1]
+            if total_pixels == 0:
+                return False
+
+            hsv_roi = cv2.cvtColor(feature_roi, cv2.COLOR_BGR2HSV)
+
+            lower_green, upper_green = np.array([35, 40, 40]), np.array([85, 255, 255])
+            lower_blue, upper_blue = np.array([100, 40, 40]), np.array([140, 255, 255])
+
+            mask_green = cv2.inRange(hsv_roi, lower_green, upper_green)
+            mask_blue = cv2.inRange(hsv_roi, lower_blue, upper_blue)
+            combined_mask = cv2.bitwise_or(mask_green, mask_blue)
+
+            activated_pixels = cv2.countNonZero(combined_mask)
+            color_density_ratio = activated_pixels / total_pixels
+            cfg_threshold = float(getattr(cfg, "tag_color_density_threshold", 0.10))
+            return color_density_ratio > cfg_threshold
+        except Exception:
+            return False
 
     def _find_nearest_target(self, boxes_array, classes_tensor):
         center = torch.tensor([capture.screen_x_center, capture.screen_y_center], device=self.arch)

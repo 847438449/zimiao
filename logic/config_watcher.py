@@ -71,6 +71,19 @@ class Config():
         self.prediction_interval = float(self.config_Aim["prediction_interval"])
         self.third_person = self.config_Aim.getboolean("third_person")
 
+        # Cooperative / IFF protective target filtering
+        if self.config.has_section("Control_Filter"):
+            self.config_Control_Filter = self.config["Control_Filter"]
+            self.cooperative_filtering = self.config_Control_Filter.getboolean("cooperative_filtering", fallback=True)
+            self.tag_color_density_threshold = self.config_Control_Filter.getfloat("tag_color_density_threshold", fallback=0.10)
+            self.resolution_scale_factor = self.config_Control_Filter.getfloat("resolution_scale_factor", fallback=1.0)
+            self.current_res_mode = self.config_Control_Filter.get("current_res_mode", fallback="1080P -> 2K")
+        else:
+            self.cooperative_filtering = self.config_Aim.getboolean("cooperative_filtering", fallback=False)
+            self.tag_color_density_threshold = self.config_Aim.getfloat("tag_color_density_threshold", fallback=0.10)
+            self.resolution_scale_factor = self.config_Aim.getfloat("resolution_scale_factor", fallback=1.0)
+            self.current_res_mode = self.config_Aim.get("current_res_mode", fallback="1080P -> 2K")
+
         # Hotkeys
         self.config_Hotkeys_settings = self.config["Hotkeys"]
         self.hotkey_targeting = str(self.config_Hotkeys_settings["hotkey_targeting"])

@@ -1,3 +1,4 @@
+import configparser
 import cv2
 import threading
 import queue
@@ -27,6 +28,7 @@ class Capture(threading.Thread):
         self.screen_y_center = int(cfg.detection_window_height / 2)
         self.prev_detection_window_width = cfg.detection_window_width
         self.prev_detection_window_height = cfg.detection_window_height
+        logger.info(f"[Capture] Detection ROI initialized: {self.prev_detection_window_width}x{self.prev_detection_window_height}")
 
         self.frame_queue = queue.Queue(maxsize=1)
         self.running = True
@@ -178,7 +180,32 @@ class Capture(threading.Thread):
         elif frame.shape[2] == 4:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-        return self.center_crop(frame, cfg.detection_window_width, cfg.detection_window_height)
+        crop_width, crop_height = self.read_detection_window_size()
+        self.update_detection_window(crop_width, crop_height)
+        return self.center_crop(frame, crop_width, crop_height)
+
+    def read_detection_window_size(self):
+        """Hot-read the central ROI size from config.ini for per-frame crop changes."""
+        try:
+            parser = configparser.ConfigParser()
+            parser.read("config.ini", encoding="utf-8")
+            crop_width = parser.getint("Detection window", "detection_window_width", fallback=self.prev_detection_window_width)
+            crop_height = parser.getint("Detection window", "detection_window_height", fallback=self.prev_detection_window_height)
+            return max(32, crop_width), max(32, crop_height)
+        except Exception:
+            return self.prev_detection_window_width, self.prev_detection_window_height
+
+    def update_detection_window(self, crop_width, crop_height):
+        if crop_width == self.prev_detection_window_width and crop_height == self.prev_detection_window_height:
+            return
+
+        self.screen_x_center = int(crop_width / 2)
+        self.screen_y_center = int(crop_height / 2)
+        cfg.detection_window_width = crop_width
+        cfg.detection_window_height = crop_height
+        self.prev_detection_window_width = crop_width
+        self.prev_detection_window_height = crop_height
+        logger.info(f"[Capture] Detection ROI reloaded: {crop_width}x{crop_height} (center={self.screen_x_center},{self.screen_y_center})")
 
     def center_crop(self, frame, target_width, target_height):
         height, width = frame.shape[:2]

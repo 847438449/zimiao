@@ -38,6 +38,21 @@ MODE_BY_LABEL = {
 }
 LABEL_BY_MODE = {mode: label for label, mode in MODE_BY_LABEL.items()}
 DEFAULT_SOURCE_PATH = r"F:\yolo_training\game_test..mp4"
+RES_1080_TO_1080 = "1080P 仿真源 -> 1080P 物理屏 (1.0x)"
+RES_1080_TO_2K = "1080P 仿真源 -> 2K 物理屏 (1.33x)"
+RES_2K_TO_2K = "2K 真实硬件 -> 2K 物理屏 (1.0x)"
+RES_MODE_CHOICES = [RES_1080_TO_1080, RES_1080_TO_2K, RES_2K_TO_2K]
+RES_MATRIX_BY_MODE = {
+    RES_1080_TO_1080: {"scale": 1.0, "crop_width": 320, "crop_height": 320},
+    RES_1080_TO_2K: {"scale": 1.3333, "crop_width": 320, "crop_height": 320},
+    RES_2K_TO_2K: {"scale": 1.0, "crop_width": 448, "crop_height": 448},
+}
+RES_MODE_ALIAS = {
+    "1080P -> 1080P": RES_1080_TO_1080,
+    "1080P -> 2K": RES_1080_TO_2K,
+    "2K -> 2K": RES_2K_TO_2K,
+    "2K 仿真源 -> 2K 物理屏 (1.0x)": RES_2K_TO_2K,
+}
 
 DEBUG_OPTIONS = {
     "显示渲染窗口 (show_window)": "show_window",
@@ -59,6 +74,8 @@ def _new_parser() -> configparser.ConfigParser:
 
 
 def _ensure_schema(config: configparser.ConfigParser) -> None:
+    if not config.has_section("Detection window"):
+        config.add_section("Detection window")
     if not config.has_section("Capture Methods"):
         config.add_section("Capture Methods")
     if not config.has_section("Aim"):
@@ -69,13 +86,23 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
         config.add_section("AI")
     if not config.has_section("Debug window"):
         config.add_section("Debug window")
+    if not config.has_section("Control_Filter"):
+        config.add_section("Control_Filter")
 
+    config.setdefault("Detection window", {})
     config.setdefault("Capture Methods", {})
     config.setdefault("Aim", {})
     config.setdefault("Mouse", {})
     config.setdefault("AI", {})
     config.setdefault("Debug window", {})
+    config.setdefault("Control_Filter", {})
 
+    if not config.has_option("Detection window", "detection_window_width"):
+        config.set("Detection window", "detection_window_width", "320")
+    if not config.has_option("Detection window", "detection_window_height"):
+        config.set("Detection window", "detection_window_height", "320")
+    if not config.has_option("Detection window", "circle_capture"):
+        config.set("Detection window", "circle_capture", "True")
     if not config.has_option("Capture Methods", "simulation_mode"):
         config.set("Capture Methods", "simulation_mode", "True")
     if not config.has_option("Capture Methods", "source_mode"):
@@ -98,6 +125,27 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
     for option in DEBUG_OPTIONS.values():
         if not config.has_option("Debug window", option):
             config.set("Debug window", option, "True")
+    if not config.has_option("Control_Filter", "cooperative_filtering"):
+        config.set("Control_Filter", "cooperative_filtering", "True")
+    if not config.has_option("Control_Filter", "tag_color_density_threshold"):
+        config.set("Control_Filter", "tag_color_density_threshold", "0.10")
+    if not config.has_option("Control_Filter", "resolution_scale_factor"):
+        config.set("Control_Filter", "resolution_scale_factor", "1.3333")
+    if not config.has_option("Control_Filter", "current_res_mode"):
+        config.set("Control_Filter", "current_res_mode", "1080P -> 2K")
+
+
+def normalize_res_mode(config_value: str) -> str:
+    value = (config_value or "").strip().strip('"').strip("'")
+    if value in RES_MODE_CHOICES:
+        return value
+    if value in RES_MODE_ALIAS:
+        return RES_MODE_ALIAS[value]
+    if "1080P" in value and "2K" in value:
+        return RES_1080_TO_2K
+    if value.startswith("2K") or "真实硬件" in value:
+        return RES_2K_TO_2K
+    return RES_1080_TO_1080
 
 
 def load_config() -> dict[str, Any]:
@@ -113,6 +161,8 @@ def load_config() -> dict[str, Any]:
             label for label, option in DEBUG_OPTIONS.items()
             if config.getboolean("Debug window", option, fallback=True)
         ],
+        "cooperative_filtering": config.getboolean("Control_Filter", "cooperative_filtering", fallback=True),
+        "resolution_mode": normalize_res_mode(config.get("Control_Filter", "current_res_mode", fallback="1080P -> 2K")),
         "AI_conf": config.getfloat("AI", "AI_conf", fallback=0.2),
         "head_shot_ratio": config.getfloat("Aim", "head_shot_ratio", fallback=0.3),
         "mouse_sensitivity": config.getfloat("Mouse", "mouse_sensitivity", fallback=3.0),
@@ -172,6 +222,8 @@ def write_config(
     source: str,
     source_path: str,
     debug_options: list[str],
+    cooperative_filtering: bool,
+    resolution_mode: str,
     ai_conf: float,
     head_shot_ratio: float,
     mouse_sensitivity: float,
@@ -184,8 +236,20 @@ def write_config(
 
     source_mode = MODE_BY_LABEL.get(source, "video")
     normalized_path = source_path.strip() or DEFAULT_SOURCE_PATH
+    normalized_res_mode = normalize_res_mode(resolution_mode)
+    res_matrix = RES_MATRIX_BY_MODE[normalized_res_mode]
+    resolution_scale_factor = float(res_matrix["scale"])
+    crop_width = int(res_matrix["crop_width"])
+    crop_height = int(res_matrix["crop_height"])
+
+    current_config = _new_parser()
+    tag_threshold = current_config.get("Control_Filter", "tag_color_density_threshold", fallback="0.10")
 
     _upsert_config_values({
+        "Detection window": {
+            "detection_window_width": str(crop_width),
+            "detection_window_height": str(crop_height),
+        },
         "Capture Methods": {
             "source_mode": source_mode,
             "source_path": normalized_path,
@@ -193,6 +257,12 @@ def write_config(
             "simulation_video_path": normalized_path,
         },
         "Debug window": debug_updates,
+        "Control_Filter": {
+            "cooperative_filtering": "True" if cooperative_filtering else "False",
+            "tag_color_density_threshold": tag_threshold,
+            "resolution_scale_factor": f"{resolution_scale_factor:.4f}".rstrip("0").rstrip("."),
+            "current_res_mode": normalized_res_mode,
+        },
         "AI": {"AI_conf": f"{float(ai_conf):.2f}"},
         "Aim": {"head_shot_ratio": f"{float(head_shot_ratio):.2f}"},
         "Mouse": {"mouse_sensitivity": f"{float(mouse_sensitivity):.2f}"},
@@ -203,6 +273,10 @@ def write_config(
         f"source_mode={source_mode}, "
         f"source_path={normalized_path}, "
         f"debug={debug_updates}, "
+        f"cooperative_filtering={bool(cooperative_filtering)}, "
+        f"resolution_mode={normalized_res_mode}, "
+        f"resolution_scale_factor={resolution_scale_factor:.4f}, "
+        f"crop={crop_width}x{crop_height}, "
         f"AI_conf={float(ai_conf):.2f}, "
         f"head_shot_ratio={float(head_shot_ratio):.2f}, "
         f"mouse_sensitivity={float(mouse_sensitivity):.2f}"
@@ -242,12 +316,23 @@ def start_pipeline(
     source: str,
     source_path: str,
     debug_options: list[str],
+    cooperative_filtering: bool,
+    resolution_mode: str,
     ai_conf: float,
     head_shot_ratio: float,
     mouse_sensitivity: float,
 ) -> str:
     global _pipeline_process, _pipeline_log_file
-    config_msg = write_config(source, source_path, debug_options, ai_conf, head_shot_ratio, mouse_sensitivity)
+    config_msg = write_config(
+        source,
+        source_path,
+        debug_options,
+        cooperative_filtering,
+        resolution_mode,
+        ai_conf,
+        head_shot_ratio,
+        mouse_sensitivity,
+    )
 
     with _process_lock:
         if _pipeline_process is not None and _pipeline_process.poll() is None:
@@ -335,6 +420,15 @@ def build_ui() -> gr.Blocks:
                 start_btn = gr.Button("🚀 初始化核心管道 (Start Pipeline)", variant="primary")
                 stop_btn = gr.Button("🛑 终止系统进程 (Terminate Process)", variant="stop")
             with gr.Column(scale=2):
+                cooperative_filtering = gr.Checkbox(
+                    value=defaults["cooperative_filtering"],
+                    label="开启协同目标身份清洗 (Cooperative Filtering)",
+                )
+                resolution_mode = gr.Dropdown(
+                    choices=RES_MODE_CHOICES,
+                    value=defaults["resolution_mode"],
+                    label="全分辨率自适应映射 (Resolution Scale Matrix)",
+                )
                 ai_conf = gr.Slider(0.01, 1.0, value=defaults["AI_conf"], step=0.01, label="目标置信度阈值 (AI_conf)")
                 head_ratio = gr.Slider(0.0, 1.0, value=defaults["head_shot_ratio"], step=0.05, label="多类别优先权权重 (head_shot_ratio)")
                 sensitivity = gr.Slider(0.1, 10.0, value=defaults["mouse_sensitivity"], step=0.1, label="系统敏感度系数 (mouse_sensitivity)")
@@ -352,7 +446,7 @@ def build_ui() -> gr.Blocks:
             )
             refresh_log_btn = gr.Button("🔄 手动刷新日志 (Refresh Log)")
 
-        inputs = [source, source_path, debug_options, ai_conf, head_ratio, sensitivity]
+        inputs = [source, source_path, debug_options, cooperative_filtering, resolution_mode, ai_conf, head_ratio, sensitivity]
         for component in inputs:
             component.change(write_config, inputs=inputs, outputs=status, show_progress=False)
 
