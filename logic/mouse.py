@@ -4,6 +4,7 @@ import math
 import os
 import json
 import socket
+import sys
 import supervision as sv
 
 from logic.config_watcher import cfg
@@ -53,6 +54,11 @@ class MouseThread:
         self.udp_send_when_key_pressed_only = cfg.udp_send_when_key_pressed_only
         self.udp_send_json = cfg.udp_send_json
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if self.udp_output else None
+        self.current_aim_mode = "UDP" if self.udp_output else "MOVE"
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
     def get_arch(self):
         if cfg.AI_enable_AMD:
@@ -97,12 +103,38 @@ class MouseThread:
         self.visualize_history(target_x, target_y)
         shooting.queue.put((self.bScope, shooting_state))
 
+        self.current_aim_mode = "UDP" if self.udp_output else "MOVE"
+        self.log_mouse_stream(dx, dy, target_cls)
+
         if self.udp_output:
             self.send_udp_offset(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
             return
 
         move_x, move_y = self.calc_movement(target_x, target_y, target_cls)
         self.move_mouse(move_x, move_y, shooting_state=shooting_state)
+
+    def log_mouse_stream(self, dx, dy, target_cls):
+        """Print the high-frequency virtual mouse offset stream for debugging."""
+        if target_cls is None:
+            cls_str = "❔ UNKNOWN"
+        else:
+            target_cls = int(target_cls)
+            if target_cls == 0:
+                cls_str = "🧠 HEAD"
+            elif target_cls == 1:
+                cls_str = "👕 BODY"
+            else:
+                cls_str = f"CLS {target_cls}"
+
+        message = (
+            f"[Mouse Stream] Target: {cls_str:<10} | "
+            f"dx: {float(dx):+6.1f} | dy: {float(dy):+6.1f} | "
+            f"Mode: {self.current_aim_mode:<4}"
+        )
+        try:
+            print(message, flush=True)
+        except UnicodeEncodeError:
+            print(message.encode("utf-8", errors="replace").decode("utf-8"), flush=True)
 
     def predict_target_position(self, target_x, target_y, current_time):
         # First target

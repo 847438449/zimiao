@@ -24,11 +24,20 @@ DASHBOARD_CSS = """
 #title {text-align: center; margin-bottom: 0.25rem;}
 #subtitle {text-align: center; color: #64748b; margin-bottom: 1.25rem;}
 .status-box textarea {font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;}
+.live-log textarea {font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.35;}
 """
 
-SIM_LABEL = "🎬 离线视频仿真 (Simulation Mode)"
-HW_LABEL = "📹 实时硬件采集 (Hardware Stream Mode)"
-DEFAULT_VIDEO_PATH = r"F:\yolo_training\game_test.mp4"
+HARDWARE_LABEL = "📹 实时硬件采集 (Hardware Mode)"
+VIDEO_LABEL = "🎬 离线视频仿真 (Video Mode)"
+IMAGE_LABEL = "🖼️ 静态图片盲测 (Image Mode)"
+SOURCE_LABELS = [HARDWARE_LABEL, VIDEO_LABEL, IMAGE_LABEL]
+MODE_BY_LABEL = {
+    HARDWARE_LABEL: "hardware",
+    VIDEO_LABEL: "video",
+    IMAGE_LABEL: "image",
+}
+LABEL_BY_MODE = {mode: label for label, mode in MODE_BY_LABEL.items()}
+DEFAULT_SOURCE_PATH = r"F:\yolo_training\game_test..mp4"
 
 DEBUG_OPTIONS = {
     "显示渲染窗口 (show_window)": "show_window",
@@ -69,8 +78,17 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
 
     if not config.has_option("Capture Methods", "simulation_mode"):
         config.set("Capture Methods", "simulation_mode", "True")
+    if not config.has_option("Capture Methods", "source_mode"):
+        legacy_sim = config.getboolean("Capture Methods", "simulation_mode", fallback=True)
+        config.set("Capture Methods", "source_mode", "video" if legacy_sim else "hardware")
+    if not config.has_option("Capture Methods", "source_path"):
+        config.set(
+            "Capture Methods",
+            "source_path",
+            config.get("Capture Methods", "simulation_video_path", fallback=DEFAULT_SOURCE_PATH),
+        )
     if not config.has_option("Capture Methods", "simulation_video_path"):
-        config.set("Capture Methods", "simulation_video_path", DEFAULT_VIDEO_PATH)
+        config.set("Capture Methods", "simulation_video_path", DEFAULT_SOURCE_PATH)
     if not config.has_option("Aim", "head_shot_ratio"):
         config.set("Aim", "head_shot_ratio", "0.3")
     if not config.has_option("Mouse", "mouse_sensitivity"):
@@ -85,9 +103,12 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
 def load_config() -> dict[str, Any]:
     config = _new_parser()
     _ensure_schema(config)
+    mode = config.get("Capture Methods", "source_mode", fallback="video").strip().lower()
+    if mode not in LABEL_BY_MODE:
+        mode = "video" if config.getboolean("Capture Methods", "simulation_mode", fallback=True) else "hardware"
     return {
-        "source": SIM_LABEL if config.getboolean("Capture Methods", "simulation_mode", fallback=True) else HW_LABEL,
-        "video_path": config.get("Capture Methods", "simulation_video_path", fallback=DEFAULT_VIDEO_PATH),
+        "source": LABEL_BY_MODE[mode],
+        "source_path": config.get("Capture Methods", "source_path", fallback=DEFAULT_SOURCE_PATH),
         "debug_options": [
             label for label, option in DEBUG_OPTIONS.items()
             if config.getboolean("Debug window", option, fallback=True)
@@ -149,7 +170,7 @@ def _upsert_config_values(updates: dict[str, dict[str, str]]) -> None:
 
 def write_config(
     source: str,
-    video_path: str,
+    source_path: str,
     debug_options: list[str],
     ai_conf: float,
     head_shot_ratio: float,
@@ -161,10 +182,15 @@ def write_config(
         for label, option in DEBUG_OPTIONS.items()
     }
 
+    source_mode = MODE_BY_LABEL.get(source, "video")
+    normalized_path = source_path.strip() or DEFAULT_SOURCE_PATH
+
     _upsert_config_values({
         "Capture Methods": {
-            "simulation_mode": "True" if source == SIM_LABEL else "False",
-            "simulation_video_path": video_path.strip() or DEFAULT_VIDEO_PATH,
+            "source_mode": source_mode,
+            "source_path": normalized_path,
+            "simulation_mode": "True" if source_mode in {"video", "image"} else "False",
+            "simulation_video_path": normalized_path,
         },
         "Debug window": debug_updates,
         "AI": {"AI_conf": f"{float(ai_conf):.2f}"},
@@ -174,8 +200,8 @@ def write_config(
 
     return (
         "✅ 配置已写入 config.ini｜"
-        f"simulation_mode={source == SIM_LABEL}, "
-        f"video_path={video_path.strip() or DEFAULT_VIDEO_PATH}, "
+        f"source_mode={source_mode}, "
+        f"source_path={normalized_path}, "
         f"debug={debug_updates}, "
         f"AI_conf={float(ai_conf):.2f}, "
         f"head_shot_ratio={float(head_shot_ratio):.2f}, "
@@ -193,16 +219,35 @@ def process_status() -> str:
         return f"已退出｜PID={_pipeline_process.pid}｜exit_code={code}"
 
 
+def read_pipeline_log(max_lines: int = 160) -> str:
+    """Return the tail of pipeline_debug.log for the live UI log panel."""
+    log_path = PROJECT_ROOT / "pipeline_debug.log"
+    if not log_path.exists():
+        return "pipeline_debug.log 尚未生成。点击 Start Pipeline 后这里会实时显示日志。"
+
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return f"读取 pipeline_debug.log 失败：{exc}"
+
+    lines = text.splitlines()
+    tail = lines[-max_lines:]
+    prefix = ""
+    if len(lines) > max_lines:
+        prefix = f"... 已省略前 {len(lines) - max_lines} 行 ...\n"
+    return prefix + "\n".join(tail)
+
+
 def start_pipeline(
     source: str,
-    video_path: str,
+    source_path: str,
     debug_options: list[str],
     ai_conf: float,
     head_shot_ratio: float,
     mouse_sensitivity: float,
 ) -> str:
     global _pipeline_process, _pipeline_log_file
-    config_msg = write_config(source, video_path, debug_options, ai_conf, head_shot_ratio, mouse_sensitivity)
+    config_msg = write_config(source, source_path, debug_options, ai_conf, head_shot_ratio, mouse_sensitivity)
 
     with _process_lock:
         if _pipeline_process is not None and _pipeline_process.poll() is None:
@@ -273,14 +318,14 @@ def build_ui() -> gr.Blocks:
         with gr.Row():
             with gr.Column(scale=1):
                 source = gr.Radio(
-                    choices=[SIM_LABEL, HW_LABEL],
+                    choices=SOURCE_LABELS,
                     value=defaults["source"],
                     label="Data Source Selector",
                 )
-                video_path = gr.Textbox(
-                    label="仿真视频绝对路径 (Video Path)",
-                    value=defaults["video_path"],
-                    placeholder=DEFAULT_VIDEO_PATH,
+                source_path = gr.Textbox(
+                    label="仿真视频/图片绝对路径 (Source Path)",
+                    value=defaults["source_path"],
+                    placeholder=DEFAULT_SOURCE_PATH,
                 )
                 debug_options = gr.CheckboxGroup(
                     choices=list(DEBUG_OPTIONS.keys()),
@@ -296,12 +341,34 @@ def build_ui() -> gr.Blocks:
 
         status = gr.Textbox(label="Runtime Status", value=f"就绪｜进程状态：{process_status()}", lines=4, elem_classes=["status-box"])
 
-        inputs = [source, video_path, debug_options, ai_conf, head_ratio, sensitivity]
+        with gr.Accordion("📡 实时 Pipeline / Mouse Stream 日志", open=True):
+            live_log = gr.Textbox(
+                label="pipeline_debug.log live tail",
+                value=read_pipeline_log(),
+                lines=18,
+                max_lines=18,
+                interactive=False,
+                elem_classes=["live-log"],
+            )
+            refresh_log_btn = gr.Button("🔄 手动刷新日志 (Refresh Log)")
+
+        inputs = [source, source_path, debug_options, ai_conf, head_ratio, sensitivity]
         for component in inputs:
             component.change(write_config, inputs=inputs, outputs=status, show_progress=False)
 
-        start_btn.click(start_pipeline, inputs=inputs, outputs=status, show_progress=True)
-        stop_btn.click(terminate_pipeline, outputs=status, show_progress=True)
+        start_btn.click(start_pipeline, inputs=inputs, outputs=status, show_progress=True).then(
+            read_pipeline_log,
+            outputs=live_log,
+            show_progress=False,
+        )
+        stop_btn.click(terminate_pipeline, outputs=status, show_progress=True).then(
+            read_pipeline_log,
+            outputs=live_log,
+            show_progress=False,
+        )
+        refresh_log_btn.click(read_pipeline_log, outputs=live_log, show_progress=False)
+        log_timer = gr.Timer(value=1.0, active=True)
+        log_timer.tick(read_pipeline_log, outputs=live_log, show_progress=False)
 
     return demo
 

@@ -28,11 +28,23 @@ class Config():
         # Capture Global
         self.config_Capture_Global = self.config["Capture Methods"]
         self.capture_fps = int(self.config_Capture_Global["capture_fps"])
-        self.simulation_mode = self.config_Capture_Global.getboolean("simulation_mode", fallback=True)
-        self.simulation_video_path = self.config_Capture_Global.get(
-            "simulation_video_path",
-            fallback=r"F:\yolo_training\game_test.mp4",
+        legacy_simulation_mode = self.config_Capture_Global.getboolean("simulation_mode", fallback=True)
+        self.source_mode = self.config_Capture_Global.get(
+            "source_mode",
+            fallback="video" if legacy_simulation_mode else "hardware",
+        ).strip().lower()
+        if self.source_mode not in {"hardware", "video", "image"}:
+            logger.warning(f"[Config] Unknown source_mode={self.source_mode!r}; falling back to video")
+            self.source_mode = "video"
+        self.simulation_mode = self.source_mode in {"video", "image"}
+        self.source_path = self.config_Capture_Global.get(
+            "source_path",
+            fallback=self.config_Capture_Global.get(
+                "simulation_video_path",
+                fallback=r"F:\yolo_training\game_test..mp4",
+            ),
         )
+        self.simulation_video_path = self.source_path
 
         # Capture Method Bettercam
         self.config_Bettercam_Capture = self.config["Capture Methods"]

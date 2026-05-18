@@ -9,7 +9,7 @@ from logic.logger import logger
 
 
 class Capture(threading.Thread):
-    DEFAULT_SIMULATION_VIDEO_PATH = r"F:\yolo_training\game_test.mp4"
+    DEFAULT_SOURCE_PATH = r"F:\yolo_training\game_test..mp4"
     USB_CAPTURE_INDEX = 1
     USB_CAPTURE_WIDTH = 1920
     USB_CAPTURE_HEIGHT = 1080
@@ -31,23 +31,50 @@ class Capture(threading.Thread):
         self.frame_queue = queue.Queue(maxsize=1)
         self.running = True
         self.cap = None
+        self.static_frame = None
         self.last_reconnect_attempt = 0.0
+        self.source_mode = cfg.source_mode
         self.simulation_mode = cfg.simulation_mode
 
         self.setup_capture()
 
     def setup_capture(self):
-        if cfg.simulation_mode:
+        mode = getattr(cfg, "source_mode", "video")
+        if mode == "image":
+            return self.setup_static_image_capture()
+        if mode == "video":
             return self.setup_simulation_capture()
         return self.setup_usb_capture()
+
+    def setup_static_image_capture(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+        self.source_mode = "image"
+        self.simulation_mode = True
+        image_path = getattr(cfg, "source_path", self.DEFAULT_SOURCE_PATH)
+        frame = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+
+        if frame is None:
+            logger.error(f"[Capture] Static image could not be opened: {image_path}")
+            self.static_frame = None
+            return False
+
+        self.static_frame = frame
+        height, width = frame.shape[:2]
+        logger.info(f"[Capture] Static image initialized (path={image_path}, actual={width}x{height})")
+        return True
 
     def setup_simulation_capture(self):
         if self.cap is not None:
             self.cap.release()
             self.cap = None
 
+        self.static_frame = None
+        self.source_mode = "video"
         self.simulation_mode = True
-        video_path = getattr(cfg, "simulation_video_path", self.DEFAULT_SIMULATION_VIDEO_PATH)
+        video_path = getattr(cfg, "source_path", getattr(cfg, "simulation_video_path", self.DEFAULT_SOURCE_PATH))
         self.cap = cv2.VideoCapture(video_path)
 
         if not self.cap.isOpened():
@@ -70,6 +97,8 @@ class Capture(threading.Thread):
             self.cap.release()
             self.cap = None
 
+        self.static_frame = None
+        self.source_mode = "hardware"
         self.simulation_mode = False
         self.cap = cv2.VideoCapture(self.USB_CAPTURE_INDEX)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.USB_CAPTURE_WIDTH)
@@ -109,6 +138,12 @@ class Capture(threading.Thread):
             self.release_capture()
 
     def capture_frame(self):
+        if self.source_mode == "image":
+            if self.static_frame is None:
+                self.reconnect_capture()
+                return None
+            return self.prepare_frame(self.static_frame.copy())
+
         if self.cap is None or not self.cap.isOpened():
             self.reconnect_capture()
             return None
@@ -123,7 +158,7 @@ class Capture(threading.Thread):
         if ret and frame is not None:
             return self.prepare_frame(frame)
 
-        if self.simulation_mode:
+        if self.source_mode == "video":
             logger.info("[Capture] Simulation video reached EOF; rewinding to frame 0")
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = self.cap.read()
@@ -175,6 +210,7 @@ class Capture(threading.Thread):
         if self.cap is not None:
             self.cap.release()
             self.cap = None
+        self.static_frame = None
 
     def get_new_frame(self):
         try:
