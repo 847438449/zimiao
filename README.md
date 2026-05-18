@@ -1,63 +1,346 @@
-<div align="center">
+# YOLOv8 Realtime Detection Dashboard
 
-# Sunone Aimbot
-[![Python Version](https://img.shields.io/badge/Python-3.12.0-FFD43B?logo=python)](https://github.com/SunOner/sunone_aimbot)
-[![License MIT](https://badgen.net/github/license/SunOner/sunone_aimbot)](https://github.com/SunOner/sunone_aimbot/blob/main/LICENSE)
-[![Github stars](https://img.shields.io/github/stars/SunOner/sunone_aimbot?color=ffb500)](https://github.com/SunOner/sunone_aimbot)
-[![Discord server](https://badgen.net/discord/online-members/sunone)](https://discord.gg/37WVp6sNEh)
-  <p>
-    <a href="https://github.com/SunOner/sunone_aimbot/releases" target="_blank">
-      <img width="75%" src="https://raw.githubusercontent.com/SunOner/sunone_aimbot/main/media/one.gif"></a>
-  </p>
-</div>
+A Windows-first realtime YOLO detection pipeline with a lightweight Gradio dashboard, dual-source capture switching, debug visualization toggles, and safer subprocess logging.
 
-## Overview
-Sunone Aimbot is an AI-powered aim bot for first-person shooter games. It leverages the YOLOv8 and YOLOv10 models, PyTorch, and various other tools to automatically target and aim at enemies within the game. The AI model in repository has been trained on more than 30,000 images from popular first-person shooter games like Warface, Destiny 2, Battlefield (all series), Fortnite, The Finals, CS2 and more.
+This fork is based on Sunone Aimbot, but the current working focus is a local YOLOv8/Ultralytics video-stream inference pipeline that can be tested from either:
+
+- an offline simulation video file, or
+- a UVC/USB hardware capture device.
+
 > [!WARNING]
-> Use it at your own risk, we do not guarantee that you may be blocked!
+> This repository contains automation and aiming-related code inherited from the upstream project. Use responsibly and only in environments where you have permission. Online games may prohibit this type of software.
 
-> [!NOTE]
-> The recommended graphics card for starting and more productive and stable operation starts with the rtx 20 series.
+---
+
+## Key Features
+
+### Dashboard Launcher
+
+`launcher_ui.py` provides a modern Gradio control panel for everyday operation.
+
+It can:
+
+- switch between offline video simulation and hardware capture mode;
+- edit the simulation video path;
+- tune inference/runtime parameters;
+- toggle debug rendering options;
+- start `run.py` as a managed subprocess;
+- terminate the subprocess safely;
+- write subprocess logs to `pipeline_debug.log`.
+
+### Dual-source Capture Pipeline
+
+`logic/capture.py` now reads `[Capture Methods]` from `config.ini`:
+
+```ini
+[Capture Methods]
+simulation_mode = True
+simulation_video_path = F:\yolo_training\game_test..mp4
+```
+
+Behavior:
+
+- `simulation_mode = True`  
+  Uses `cv2.VideoCapture(simulation_video_path)` for offline testing.
+- `simulation_mode = False`  
+  Uses the hardware capture stream, currently `cv2.VideoCapture(1)`.
+- When the simulation video reaches EOF, the pipeline rewinds to frame `0` automatically and keeps inference running.
+
+### Debug Window Controls
+
+The dashboard can write these values into `[Debug window]` automatically:
+
+```ini
+show_window = True
+show_boxes = True
+show_labels = True
+show_conf = True
+```
+
+No manual config editing is required for normal testing.
+
+### Process Logging
+
+When the dashboard starts the core pipeline, stdout and stderr are redirected to:
+
+```text
+pipeline_debug.log
+```
+
+This prevents silent crashes. If `run.py` exits early, check the last lines of this file.
+
+---
 
 ## Requirements
-Before you get started, make sure you have the following prerequisites installed and pay attention to the versions in [Tested Environment](https://github.com/SunOner/sunone_aimbot?tab=readme-ov-file#tested-environment) block, this may cause errors in launching the aimbot.
 
-- [Config options](https://github.com/SunOner/sunone_aimbot_docs/blob/main/config/config.md)
-- [Install guide](https://github.com/SunOner/sunone_aimbot_docs/blob/main/install/helper.md)
-- [Questions](https://github.com/SunOner/sunone_aimbot_docs/blob/main/questions/questions.md)
-- [Arduino setup](https://github.com/SunOner/HID_Arduino)
-- [Arduino Logitech G-series](https://github.com/SunOner/usb-host-shield-mouse_for_ai_aimbot)
-- [Discord server](https://discord.gg/sunone)
-- [AI Models docs](https://github.com/SunOner/sunone_aimbot_docs/blob/main/ai_models/ai_models.md)
+Recommended environment:
 
-<br></br>
-- To launch the aimbot after all installations, start run_ai.bat or type `py run.py`.
+- Windows 10/11
+- Python 3.12
+- NVIDIA GPU with CUDA-capable PyTorch for normal GPU inference
+- Local virtual environment at `.venv`
 
-# Use the new C++ version of the AI-Aimbot!
-- [Sunone_aimbot_cpp](https://github.com/SunOner/sunone_aimbot_cpp): The Python version is good, but C++ is even better. It has an overlay, is faster, and much more. Currently, it is updated much more frequently than the Python version. It's better to use the C++ version.
+Python packages are installed from:
 
-## Working environment:
-<table>
-  <thead><tr><th>Windows</th><td>10 and 11(priority)</td></thead>
-  <thead><tr><th>Python:</th><td>3.12.0</td></tr></thead>
-  <thead><tr><th>CUDA:</th><td>12.8</td></tr></thead>
-  <thead><tr><th>TensorRT:</th><td>10.13.0.35</td></tr></thead>
-  <thead><tr><th>Ultralytics:</th><td>8.3.174</td></tr></thead>
-  <thead><tr><th>GitHub AI Model:</th><td>sunxds_0.5.6 (YOLOv10)</td></tr></thead>
-  <thead><tr><th>Supporters AI Model:</th><td>sunxds_0.7.8 (YOLOv12)</td></tr></thead>
-</table>
+```text
+requirements.txt
+```
 
-## Notes / Recommendations
-- Limit the maximum value of frames per second in the game in which you will use it. And also do not set the screen resolution to high. Do not overload the graphics card.
-- Do not set high graphics settings in games.
-- Limit the browser (try not to watch YouTube while playing and working AI at the same time, for example (of course if you don't have a super duper graphics card)) and so on, which loads the video card.
-- Try to use TensorRT for acceleration. `.pt` model is good, but does not have as much speed as `.engine`.
-- Turn off the cv2 debug window, this saves system resources.
-- Do not increase the object search window resolution, this may affect your search speed.
-- If you have started the application and nothing happens, it may be working, close it with the F2 key and change the `show_window` option to `True` in the file [config.ini](https://github.com/SunOner/sunone_aimbot/blob/main/config.ini) to make sure that the application is working.
+Notable packages:
 
-## Support the project
-[Boosty](https://boosty.to/sunone) [Patreon](https://www.patreon.com/sunone).
+- `ultralytics`
+- `torch`
+- `opencv-python`
+- `supervision`
+- `gradio`
+
+---
+
+## Setup
+
+From the project root:
+
+```bat
+setup_local.bat
+```
+
+This creates/updates `.venv`, installs dependencies, and runs a basic import check.
+
+If you prefer manual setup:
+
+```bat
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.venv\Scripts\python.exe -m pip install -r requirements.txt streamlit
+.venv\Scripts\python.exe check_env.py
+```
+
+---
+
+## Start the Dashboard
+
+Recommended:
+
+```bat
+start_dashboard.bat
+```
+
+Or manually:
+
+```bat
+.venv\Scripts\python.exe launcher_ui.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:7860/
+```
+
+`start_dashboard.bat` also opens the browser automatically.
+
+---
+
+## Offline Video Test Workflow
+
+1. Start the dashboard:
+
+   ```bat
+   start_dashboard.bat
+   ```
+
+2. In **Data Source Selector**, choose:
+
+   ```text
+   🎬 离线视频仿真 (Simulation Mode)
+   ```
+
+3. Set **仿真视频绝对路径 (Video Path)** to an existing local video, for example:
+
+   ```text
+   F:\yolo_training\game_test..mp4
+   ```
+
+4. Enable debug visualization if needed:
+
+   - `show_window`
+   - `show_boxes`
+   - `show_labels`
+   - `show_conf`
+
+5. Tune parameters:
+
+   - `AI_conf`
+   - `head_shot_ratio`
+   - `mouse_sensitivity`
+
+6. Click:
+
+   ```text
+   🚀 初始化核心管道 (Start Pipeline)
+   ```
+
+7. If no window appears or the process exits, inspect:
+
+   ```text
+   pipeline_debug.log
+   ```
+
+8. To stop the pipeline, click:
+
+   ```text
+   🛑 终止系统进程 (Terminate Process)
+   ```
+
+---
+
+## Hardware Capture Workflow
+
+1. Connect the USB/UVC capture device.
+2. Start the dashboard.
+3. Choose:
+
+   ```text
+   📹 实时硬件采集 (Hardware Stream Mode)
+   ```
+
+4. Click **Start Pipeline**.
+
+The default hardware capture index is configured in `logic/capture.py`:
+
+```python
+USB_CAPTURE_INDEX = 1
+USB_CAPTURE_WIDTH = 1920
+USB_CAPTURE_HEIGHT = 1080
+USB_CAPTURE_FPS = 60
+```
+
+Adjust these constants if your device uses a different index or resolution.
+
+---
+
+## Important Files
+
+```text
+launcher_ui.py          Gradio dashboard and subprocess manager
+start_dashboard.bat     One-click dashboard launcher
+run.py                  Core inference loop
+logic/capture.py        Dual-source frame capture pipeline
+logic/config_watcher.py config.ini reader
+logic/frame_parser.py   Detection target selection logic
+logic/checks.py         Environment/model validation
+config.ini              Runtime configuration
+pipeline_debug.log      Generated runtime log; safe to delete
+```
+
+---
+
+## Configuration Notes
+
+### Model Path
+
+`config.ini` uses:
+
+```ini
+[AI]
+AI_model_name = best.pt
+```
+
+The code checks both:
+
+```text
+models/best.pt
+best.pt
+```
+
+So the model can be placed either in `models/` or in the project root.
+
+### Simulation Video Path
+
+The simulation video path is controlled by:
+
+```ini
+[Capture Methods]
+simulation_video_path = F:\yolo_training\game_test..mp4
+```
+
+The dashboard writes this field automatically when the path textbox changes.
+
+### Debug Window
+
+If the program is running but no visual output appears, enable these from the dashboard:
+
+```ini
+[Debug window]
+show_window = True
+show_boxes = True
+show_labels = True
+show_conf = True
+```
+
+---
+
+## Troubleshooting
+
+### Dashboard starts but pipeline immediately stops
+
+Check:
+
+```text
+pipeline_debug.log
+```
+
+Common causes:
+
+- missing model file;
+- wrong video path;
+- CUDA/PyTorch mismatch;
+- missing dependency;
+- unavailable camera index.
+
+### `python` uses the wrong environment
+
+The dashboard uses `sys.executable` when starting `run.py`, so it should use the same `.venv` interpreter that launched `launcher_ui.py`.
+
+Always start the dashboard with:
+
+```bat
+.venv\Scripts\python.exe launcher_ui.py
+```
+
+or:
+
+```bat
+start_dashboard.bat
+```
+
+### Video does not open
+
+Confirm the file exists and the path in the dashboard is exact. Windows paths should look like:
+
+```text
+F:\folder\video.mp4
+```
+
+---
+
+## Legacy Launchers
+
+The original helper launchers are still available:
+
+```bat
+run_ai.bat       Start run.py directly
+run_helper.bat   Start the Streamlit helper UI
+```
+
+For the new workflow, prefer:
+
+```bat
+start_dashboard.bat
+```
+
+---
 
 ## License
-This project is licensed under the MIT License. See **[LICENSE](https://github.com/SunOner/sunone_aimbot/blob/main/LICENSE)** for details
+
+This project keeps the upstream MIT license. See `LICENSE` for details.
