@@ -41,11 +41,13 @@ class Capture(threading.Thread):
         self.setup_capture()
 
     def setup_capture(self):
-        mode = getattr(cfg, "source_mode", "video")
+        mode = self.read_source_mode()
         if mode == "image":
             return self.setup_static_image_capture()
         if mode == "video":
             return self.setup_simulation_capture()
+        if mode == "obs":
+            return self.setup_obs_capture()
         return self.setup_usb_capture()
 
     def setup_static_image_capture(self):
@@ -91,6 +93,32 @@ class Capture(threading.Thread):
             "[Capture] Simulation video initialized "
             f"(path={video_path}, frames={total_frames}, "
             f"actual={actual_width}x{actual_height}@{actual_fps:.2f})"
+        )
+        return True
+
+    def setup_obs_capture(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+        self.static_frame = None
+        self.source_mode = "obs"
+        self.simulation_mode = False
+        camera_index = self.read_obs_camera_index()
+        self.cap = cv2.VideoCapture(int(camera_index))
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self.cap.set(cv2.CAP_PROP_FPS, self.USB_CAPTURE_FPS)
+
+        if not self.cap.isOpened():
+            logger.error(f"[Capture] OBS virtual camera index {camera_index} could not be opened")
+            return False
+
+        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        logger.info(
+            "[Capture] OBS virtual bus initialized "
+            f"(index={camera_index}, fourcc=MJPG, actual={actual_width}x{actual_height}@{actual_fps:.2f})"
         )
         return True
 
@@ -140,6 +168,8 @@ class Capture(threading.Thread):
             self.release_capture()
 
     def capture_frame(self):
+        self.reload_source_mode_if_needed()
+
         if self.source_mode == "image":
             if self.static_frame is None:
                 self.reconnect_capture()
@@ -170,7 +200,7 @@ class Capture(threading.Thread):
             self.reconnect_capture(force=True)
             return None
 
-        logger.warning("[Capture] USB frame read failed, reconnecting capture card")
+        logger.warning(f"[Capture] {self.source_mode} frame read failed, reconnecting capture source")
         self.reconnect_capture(force=True)
         return None
 
@@ -184,11 +214,40 @@ class Capture(threading.Thread):
         self.update_detection_window(crop_width, crop_height)
         return self.center_crop(frame, crop_width, crop_height)
 
+    def read_config(self):
+        parser = configparser.ConfigParser()
+        parser.read("config.ini", encoding="utf-8")
+        return parser
+
+    def read_source_mode(self):
+        try:
+            mode = self.read_config().get("Capture Methods", "source_mode", fallback=getattr(cfg, "source_mode", "video")).strip().lower()
+            return mode if mode in {"hardware", "video", "image", "obs"} else "video"
+        except Exception:
+            return getattr(cfg, "source_mode", "video")
+
+    def read_obs_camera_index(self):
+        try:
+            return self.read_config().getint("Capture Methods", "obs_camera_index", fallback=getattr(cfg, "obs_camera_index", 1))
+        except Exception:
+            return getattr(cfg, "obs_camera_index", 1)
+
+    def reload_source_mode_if_needed(self):
+        current_mode = self.read_source_mode()
+        if current_mode == self.source_mode:
+            return
+
+        logger.info(f"[Capture] source_mode reloaded: {self.source_mode} -> {current_mode}")
+        cfg.source_mode = current_mode
+        cfg.simulation_mode = current_mode in {"video", "image"}
+        self.release_capture()
+        self.source_mode = current_mode
+        self.setup_capture()
+
     def read_detection_window_size(self):
         """Hot-read the central ROI size from config.ini for per-frame crop changes."""
         try:
-            parser = configparser.ConfigParser()
-            parser.read("config.ini", encoding="utf-8")
+            parser = self.read_config()
             crop_width = parser.getint("Detection window", "detection_window_width", fallback=self.prev_detection_window_width)
             crop_height = parser.getint("Detection window", "detection_window_height", fallback=self.prev_detection_window_height)
             return max(32, crop_width), max(32, crop_height)

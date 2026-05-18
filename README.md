@@ -8,15 +8,40 @@
 
 ## English
 
-A Windows-first realtime YOLO detection pipeline with a lightweight Gradio dashboard, dual-source capture switching, debug visualization toggles, and safer subprocess logging.
+A Windows-first realtime YOLO detection pipeline with a lightweight Gradio dashboard, four-source capture switching, adaptive resolution/ROI mapping, cooperative color-tag filtering, and safer subprocess logging.
 
-This fork is based on Sunone Aimbot, but the current working focus is a local YOLOv8/Ultralytics video-stream inference pipeline that can be tested from either:
+This fork is based on Sunone Aimbot, but the current working focus is a local YOLOv8/Ultralytics video-stream inference pipeline that can be tested from:
 
-- an offline simulation video file, or
-- a UVC/USB hardware capture device.
+- a USB/UVC hardware capture device;
+- an offline simulation video file;
+- a static image blind-test input; or
+- a local OBS virtual-camera bus.
 
 > [!WARNING]
 > This repository contains automation and aiming-related code inherited from the upstream project. Use responsibly and only in environments where you have permission. Online games may prohibit this type of software.
+
+---
+
+## Current Consolidated Pipeline
+
+The current control chain is:
+
+```text
+Capture source -> dynamic center ROI crop -> YOLOv8 inference -> cooperative/IFF color filter -> target stabilizer -> EMA smoothing -> resolution scale compensation -> stochastic movement multiplier -> execution route
+```
+
+Execution routing is source-aware:
+
+- `source_mode = obs` routes final movement pulses to local Win32 relative movement (`LOCALAPI`).
+- `source_mode = hardware`, `video`, or `image` routes final movement pulses through UDP for an external KMBOX-style executor (`KMBOX_UDP`).
+
+Resolution matrix presets keep coordinate gain and ROI size independent:
+
+| Mode | Scale | ROI |
+| --- | ---: | ---: |
+| `1080P OBS虚拟流/仿真源 -> 2K 物理屏 (1.33x)` | `1.3333` | `320x320` |
+| `2K 真实硬件/OBS虚拟流 -> 2K 物理屏 (1.0x)` | `1.0` | `448x448` |
+| `1080P 仿真源 -> 1080P 物理屏 (1.0x)` | `1.0` | `320x320` |
 
 ---
 
@@ -28,31 +53,34 @@ This fork is based on Sunone Aimbot, but the current working focus is a local YO
 
 It can:
 
-- switch between offline video simulation and hardware capture mode;
-- edit the simulation video path;
+- switch between hardware, video, image, and OBS virtual-bus capture modes;
+- edit the simulation video/static image path;
+- toggle cooperative/IFF color filtering;
+- select an adaptive resolution matrix that writes both coordinate scale and ROI size;
 - tune inference/runtime parameters;
 - toggle debug rendering options;
 - start `run.py` as a managed subprocess;
 - terminate the subprocess safely;
 - write subprocess logs to `pipeline_debug.log`.
 
-### Dual-source Capture Pipeline
+### Four-source Capture Pipeline
 
 `logic/capture.py` now reads `[Capture Methods]` from `config.ini`:
 
 ```ini
 [Capture Methods]
-simulation_mode = True
-simulation_video_path = F:\yolo_training\game_test..mp4
+source_mode = obs        # hardware / video / image / obs
+source_path = F:\yolo_training\game_test.mp4
+obs_camera_index = 1
 ```
 
 Behavior:
 
-- `simulation_mode = True`  
-  Uses `cv2.VideoCapture(simulation_video_path)` for offline testing.
-- `simulation_mode = False`  
-  Uses the hardware capture stream, currently `cv2.VideoCapture(1)`.
-- When the simulation video reaches EOF, the pipeline rewinds to frame `0` automatically and keeps inference running.
+- `source_mode = hardware` uses the USB/UVC capture stream.
+- `source_mode = video` uses `cv2.VideoCapture(source_path)` and rewinds to frame `0` at EOF.
+- `source_mode = image` loads one static image and repeats it for blind testing.
+- `source_mode = obs` uses the local OBS virtual camera via `cv2.VideoCapture(obs_camera_index)` with MJPG FOURCC.
+- The center detection ROI is hot-read from `config.ini`, so switching between `320x320` and `448x448` does not require code edits.
 
 ### Debug Window Controls
 
@@ -233,9 +261,10 @@ Adjust these constants if your device uses a different index or resolution.
 launcher_ui.py          Gradio dashboard and subprocess manager
 start_dashboard.bat     One-click dashboard launcher
 run.py                  Core inference loop
-logic/capture.py        Dual-source frame capture pipeline
+logic/capture.py        Four-source frame capture pipeline with hot ROI crop
 logic/config_watcher.py config.ini reader
-logic/frame_parser.py   Detection target selection logic
+logic/frame_parser.py   Detection target selection and cooperative filter
+logic/mouse.py          EMA/scale/random movement pipeline and LOCALAPI/KMBOX routing
 logic/checks.py         Environment/model validation
 config.ini              Runtime configuration
 pipeline_debug.log      Generated runtime log; safe to delete
@@ -353,17 +382,42 @@ start_dashboard.bat
 
 ## 中文说明
 
-这是一个面向 Windows 的 YOLO 实时视频流目标检测项目，加入了轻量级 Gradio Dashboard、双数据源切换、调试窗口可视化开关，以及后台子进程日志记录能力。
+这是一个面向 Windows 的 YOLO 实时视频流目标检测项目，加入了轻量级 Gradio Dashboard、四模数据源切换、分辨率/ROI 自适应矩阵、协同颜色标签过滤、调试窗口可视化开关，以及后台子进程日志记录能力。
 
-本项目基于 Sunone Aimbot 修改，但当前重点是构建一个可用于本地测试和硬件采集的 YOLOv8 / Ultralytics 实时推理流水线。
+本项目基于 Sunone Aimbot 修改，但当前重点是构建一个可用于本地测试、硬件采集和 OBS 单机虚拟总线的 YOLOv8 / Ultralytics 实时推理流水线。
 
-支持两种输入源：
+支持四种输入源：
 
+- UVC / USB 硬件视频采集设备；
 - 本地离线视频仿真测试；
-- UVC / USB 硬件视频采集设备。
+- 静态图片盲测；
+- OBS 虚拟摄像头 / 虚拟总线。
 
 > [!WARNING]
 > 本仓库继承了上游项目中的自动化和瞄准相关代码。请只在你有权限的环境中负责任地使用。很多在线游戏禁止此类软件。
+
+---
+
+## 当前完全体流水线
+
+当前控制链路：
+
+```text
+采集源 -> 动态中心 ROI 裁剪 -> YOLOv8 推理 -> 协同/IFF 颜色过滤 -> 目标稳定 -> EMA 低通 -> 分辨率增益补偿 -> 随机仿生倍率 -> 执行端路由
+```
+
+执行端按数据源刚性分流：
+
+- `source_mode = obs`：最终控制脉冲走本机 Win32 相对位移注入，日志模式为 `LOCALAPI`。
+- `source_mode = hardware / video / image`：最终控制脉冲走 UDP，日志模式为 `KMBOX_UDP`。
+
+分辨率矩阵会同时写入坐标增益和中心 ROI 尺寸：
+
+| 模式 | Scale | ROI |
+| --- | ---: | ---: |
+| `1080P OBS虚拟流/仿真源 -> 2K 物理屏 (1.33x)` | `1.3333` | `320x320` |
+| `2K 真实硬件/OBS虚拟流 -> 2K 物理屏 (1.0x)` | `1.0` | `448x448` |
+| `1080P 仿真源 -> 1080P 物理屏 (1.0x)` | `1.0` | `320x320` |
 
 ---
 
@@ -375,31 +429,34 @@ start_dashboard.bat
 
 它可以：
 
-- 在离线视频仿真和硬件采集之间切换；
-- 修改仿真视频绝对路径；
+- 在硬件采集、离线视频、静态图片、OBS 虚拟总线之间切换；
+- 修改仿真视频 / 静态图片绝对路径；
+- 开关协同目标身份清洗；
+- 选择分辨率自适应矩阵，同时写入坐标增益和中心 ROI 尺寸；
 - 调整推理和运行参数；
 - 开关调试窗口、检测框、类别标签、置信度显示；
 - 以受控子进程方式启动 `run.py`；
 - 安全终止核心推理进程；
 - 将后台运行日志写入 `pipeline_debug.log`。
 
-### 双源采集底层流水线
+### 四源采集底层流水线
 
 `logic/capture.py` 会读取 `config.ini` 中的 `[Capture Methods]`：
 
 ```ini
 [Capture Methods]
-simulation_mode = True
-simulation_video_path = F:\yolo_training\game_test..mp4
+source_mode = obs        # hardware / video / image / obs
+source_path = F:\yolo_training\game_test.mp4
+obs_camera_index = 1
 ```
 
 运行逻辑：
 
-- `simulation_mode = True`  
-  使用 `cv2.VideoCapture(simulation_video_path)` 读取本地视频进行仿真测试。
-- `simulation_mode = False`  
-  使用硬件采集流，当前默认是 `cv2.VideoCapture(1)`。
-- 当仿真视频播放到结尾时，程序会自动跳回第 `0` 帧，实现循环回放，保证推理流水线持续运行。
+- `source_mode = hardware`：使用 USB / UVC 硬件采集流。
+- `source_mode = video`：使用 `cv2.VideoCapture(source_path)` 读取本地视频，并在 EOF 时自动回到第 `0` 帧。
+- `source_mode = image`：加载一张静态图片并重复送入推理，用于盲测。
+- `source_mode = obs`：使用 OBS 虚拟摄像头，调用 `cv2.VideoCapture(obs_camera_index)` 并设置 MJPG FOURCC。
+- 中心检测 ROI 每帧从 `config.ini` 热读取，可在 `320x320` 与 `448x448` 间动态切换。
 
 ### 调试窗口开关
 
@@ -580,9 +637,10 @@ USB_CAPTURE_FPS = 60
 launcher_ui.py          Gradio Dashboard 和子进程管理器
 start_dashboard.bat     一键启动 Dashboard 的 Windows 脚本
 run.py                  核心推理循环
-logic/capture.py        双源视频帧采集模块
+logic/capture.py        四源视频帧采集模块，支持热加载 ROI 裁剪
 logic/config_watcher.py config.ini 配置读取模块
-logic/frame_parser.py   检测结果目标选择逻辑
+logic/frame_parser.py   检测结果目标选择与协同过滤逻辑
+logic/mouse.py          EMA/Scale/随机倍率控制链路与 LOCALAPI/KMBOX 分流
 logic/checks.py         环境与模型检查
 config.ini              运行时配置文件
 pipeline_debug.log      运行时生成的调试日志，可删除

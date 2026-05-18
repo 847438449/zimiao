@@ -260,8 +260,25 @@ class FrameParser:
         classes_tensor = torch.from_numpy(class_ids.astype(np.float32)).to(self.arch)
         return xywh, classes_tensor
 
+    def read_filter_runtime(self):
+        try:
+            import configparser
+            parser = configparser.ConfigParser()
+            parser.read("config.ini", encoding="utf-8")
+            anti_team_kill = parser.getboolean("Aim", "anti_team_kill", fallback=getattr(cfg, "anti_team_kill", True))
+            cooperative = parser.getboolean("Control_Filter", "cooperative_filtering", fallback=getattr(cfg, "cooperative_filtering", True))
+            threshold = parser.getfloat(
+                "Aim",
+                "teammate_color_threshold",
+                fallback=parser.getfloat("Control_Filter", "tag_color_density_threshold", fallback=0.10),
+            )
+            return anti_team_kill and cooperative, threshold
+        except Exception:
+            return getattr(cfg, "anti_team_kill", True) and getattr(cfg, "cooperative_filtering", False), getattr(cfg, "tag_color_density_threshold", 0.10)
+
     def _filter_cooperative_candidates(self, current_frame, xyxy, class_ids):
-        if not getattr(cfg, "cooperative_filtering", False) or current_frame is None or xyxy.size == 0:
+        filter_enabled, _ = self.read_filter_runtime()
+        if not filter_enabled or current_frame is None or xyxy.size == 0:
             return xyxy, class_ids
 
         keep_indices = []
@@ -324,8 +341,8 @@ class FrameParser:
 
             activated_pixels = cv2.countNonZero(combined_mask)
             color_density_ratio = activated_pixels / total_pixels
-            cfg_threshold = float(getattr(cfg, "tag_color_density_threshold", 0.10))
-            return color_density_ratio > cfg_threshold
+            _, cfg_threshold = self.read_filter_runtime()
+            return color_density_ratio > float(cfg_threshold)
         except Exception:
             return False
 

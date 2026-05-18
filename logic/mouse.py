@@ -106,24 +106,56 @@ class MouseThread:
         self.visualize_history(target_x, target_y)
         shooting.queue.put((self.bScope, shooting_state))
 
-        self.current_aim_mode = "UDP" if self.udp_output else "MOVE"
-        random_multiplier = None
-        if self.udp_output:
-            dx, dy, random_multiplier = self.apply_udp_random_multiplier(dx, dy)
-
+        dx, dy = self.apply_ema_filter(dx, dy)
         dx, dy, scale_factor = self.apply_resolution_scale(dx, dy)
+        dx, dy, random_multiplier = self.apply_udp_random_multiplier(dx, dy)
 
-        self.log_mouse_stream(dx, dy, target_cls, random_multiplier=random_multiplier, scale_factor=scale_factor)
+        source_mode = self.read_current_source_mode()
+        self.dispatch_control_pulse(
+            dx,
+            dy,
+            target_x,
+            target_y,
+            target_w,
+            target_h,
+            target_cls,
+            shooting_state,
+            source_mode,
+            random_multiplier,
+            scale_factor,
+        )
 
-        if self.udp_output:
-            self.send_udp_offset(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
-            return
+    def read_runtime_config(self):
+        parser = configparser.ConfigParser()
+        parser.read("config.ini", encoding="utf-8")
+        return parser
 
-        move_x, move_y = self.calc_movement(target_x, target_y, target_cls)
-        self.move_mouse(move_x, move_y, shooting_state=shooting_state)
+    def read_current_source_mode(self):
+        try:
+            mode = self.read_runtime_config().get("Capture Methods", "source_mode", fallback=getattr(cfg, "source_mode", "video"))
+            return mode.strip().lower()
+        except Exception:
+            return getattr(cfg, "source_mode", "video")
+
+    def read_ema_alpha(self):
+        try:
+            alpha = self.read_runtime_config().getfloat("Control_Filter", "ema_alpha", fallback=getattr(cfg, "ema_alpha", 0.35))
+        except Exception:
+            alpha = getattr(cfg, "ema_alpha", 0.35)
+        return max(0.0, min(1.0, float(alpha)))
+
+    def apply_ema_filter(self, dx, dy):
+        """Apply first-order low-pass EMA to final target deltas before scaling."""
+        alpha = self.read_ema_alpha()
+        if not hasattr(self, "ema_dx"):
+            self.ema_dx, self.ema_dy = dx, dy
+        else:
+            self.ema_dx = alpha * dx + (1 - alpha) * self.ema_dx
+            self.ema_dy = alpha * dy + (1 - alpha) * self.ema_dy
+        return self.ema_dx, self.ema_dy
 
     def apply_udp_random_multiplier(self, dx, dy):
-        """Inject per-frame random resistance into UDP virtual mouse offsets."""
+        """Inject per-frame stochastic resistance into final control offsets."""
         min_mult = float(getattr(cfg, "mouse_min_speed_multiplier", self.min_speed_multiplier))
         max_mult = float(getattr(cfg, "mouse_max_speed_multiplier", self.max_speed_multiplier))
         if min_mult > max_mult:
@@ -157,8 +189,7 @@ class MouseThread:
     def read_resolution_scale_factor(self):
         """Read the latest resolution scale from config.ini for hot UI switching."""
         try:
-            parser = configparser.ConfigParser()
-            parser.read("config.ini", encoding="utf-8")
+            parser = self.read_runtime_config()
             return parser.getfloat("Control_Filter", "resolution_scale_factor", fallback=1.0)
         except Exception:
             return float(getattr(cfg, "resolution_scale_factor", 1.0))
@@ -296,9 +327,47 @@ class MouseThread:
 
         return move_x, move_y
 
-    def send_udp_offset(self, dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state):
+    def ensure_udp_socket(self):
         if self.udp_socket is None:
-            return
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def local_move(self, dx, dy):
+        """
+        Send relative mouse movement through the Windows input bus.
+
+        :param dx: final horizontal pixel delta after filtering/scaling/randomization
+        :param dy: final vertical pixel delta after filtering/scaling/randomization
+        """
+        try:
+            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(dx), int(dy), 0, 0)
+        except Exception as e:
+            print(f"[Mouse Driver Error] Local mouse injection failed: {e}", flush=True)
+
+    def dispatch_control_pulse(
+        self,
+        dx,
+        dy,
+        target_x,
+        target_y,
+        target_w,
+        target_h,
+        target_cls,
+        shooting_state,
+        source_mode,
+        random_multiplier,
+        scale_factor,
+    ):
+        if source_mode == "obs":
+            self.current_aim_mode = "LOCALAPI"
+            self.local_move(dx, dy)
+        else:
+            self.current_aim_mode = "KMBOX_UDP"
+            self.send_udp_offset(dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state)
+
+        self.log_mouse_stream(dx, dy, target_cls, random_multiplier=random_multiplier, scale_factor=scale_factor)
+
+    def send_udp_offset(self, dx, dy, target_x, target_y, target_w, target_h, target_cls, shooting_state):
+        self.ensure_udp_socket()
 
         if self.udp_send_when_key_pressed_only and not shooting_state:
             return

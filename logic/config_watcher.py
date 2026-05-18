@@ -33,10 +33,11 @@ class Config():
             "source_mode",
             fallback="video" if legacy_simulation_mode else "hardware",
         ).strip().lower()
-        if self.source_mode not in {"hardware", "video", "image"}:
+        if self.source_mode not in {"hardware", "video", "image", "obs"}:
             logger.warning(f"[Config] Unknown source_mode={self.source_mode!r}; falling back to video")
             self.source_mode = "video"
         self.simulation_mode = self.source_mode in {"video", "image"}
+        self.obs_camera_index = self.config_Capture_Global.getint("obs_camera_index", fallback=1)
         self.source_path = self.config_Capture_Global.get(
             "source_path",
             fallback=self.config_Capture_Global.get(
@@ -70,19 +71,26 @@ class Config():
         self.disable_prediction = self.config_Aim.getboolean("disable_prediction")
         self.prediction_interval = float(self.config_Aim["prediction_interval"])
         self.third_person = self.config_Aim.getboolean("third_person")
+        self.anti_team_kill = self.config_Aim.getboolean("anti_team_kill", fallback=True)
+        self.teammate_color_threshold = self.config_Aim.getfloat("teammate_color_threshold", fallback=0.10)
 
         # Cooperative / IFF protective target filtering
         if self.config.has_section("Control_Filter"):
             self.config_Control_Filter = self.config["Control_Filter"]
             self.cooperative_filtering = self.config_Control_Filter.getboolean("cooperative_filtering", fallback=True)
-            self.tag_color_density_threshold = self.config_Control_Filter.getfloat("tag_color_density_threshold", fallback=0.10)
+            self.tag_color_density_threshold = self.config_Control_Filter.getfloat(
+                "tag_color_density_threshold",
+                fallback=self.teammate_color_threshold,
+            )
             self.resolution_scale_factor = self.config_Control_Filter.getfloat("resolution_scale_factor", fallback=1.0)
-            self.current_res_mode = self.config_Control_Filter.get("current_res_mode", fallback="1080P -> 2K")
+            self.current_res_mode = self.config_Control_Filter.get("current_res_mode", fallback="1080P OBS虚拟流 -> 2K 物理屏 (1.33x)")
+            self.ema_alpha = self.config_Control_Filter.getfloat("ema_alpha", fallback=0.35)
         else:
             self.cooperative_filtering = self.config_Aim.getboolean("cooperative_filtering", fallback=False)
-            self.tag_color_density_threshold = self.config_Aim.getfloat("tag_color_density_threshold", fallback=0.10)
+            self.tag_color_density_threshold = self.config_Aim.getfloat("tag_color_density_threshold", fallback=self.teammate_color_threshold)
             self.resolution_scale_factor = self.config_Aim.getfloat("resolution_scale_factor", fallback=1.0)
-            self.current_res_mode = self.config_Aim.get("current_res_mode", fallback="1080P -> 2K")
+            self.current_res_mode = self.config_Aim.get("current_res_mode", fallback="1080P OBS虚拟流 -> 2K 物理屏 (1.33x)")
+            self.ema_alpha = self.config_Aim.getfloat("ema_alpha", fallback=0.35)
 
         # Hotkeys
         self.config_Hotkeys_settings = self.config["Hotkeys"]
@@ -104,6 +112,7 @@ class Config():
         self.mouse_auto_aim = self.config_Mouse.getboolean("mouse_auto_aim")
         self.mouse_ghub = self.config_Mouse.getboolean("mouse_ghub")
         self.mouse_rzr = self.config_Mouse.getboolean("mouse_rzr")
+        self.mouse_udp_output = self.config_Mouse.getboolean("udp_output", fallback=False)
 
         # UDP Output
         if self.config.has_section("UDP Output"):

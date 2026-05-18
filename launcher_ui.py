@@ -30,17 +30,19 @@ DASHBOARD_CSS = """
 HARDWARE_LABEL = "📹 实时硬件采集 (Hardware Mode)"
 VIDEO_LABEL = "🎬 离线视频仿真 (Video Mode)"
 IMAGE_LABEL = "🖼️ 静态图片盲测 (Image Mode)"
-SOURCE_LABELS = [HARDWARE_LABEL, VIDEO_LABEL, IMAGE_LABEL]
+OBS_LABEL = "🖥️ 单机 OBS 虚拟总线 (OBS Virtual Bus)"
+SOURCE_LABELS = [HARDWARE_LABEL, VIDEO_LABEL, IMAGE_LABEL, OBS_LABEL]
 MODE_BY_LABEL = {
     HARDWARE_LABEL: "hardware",
     VIDEO_LABEL: "video",
     IMAGE_LABEL: "image",
+    OBS_LABEL: "obs",
 }
 LABEL_BY_MODE = {mode: label for label, mode in MODE_BY_LABEL.items()}
 DEFAULT_SOURCE_PATH = r"F:\yolo_training\game_test..mp4"
 RES_1080_TO_1080 = "1080P 仿真源 -> 1080P 物理屏 (1.0x)"
-RES_1080_TO_2K = "1080P 仿真源 -> 2K 物理屏 (1.33x)"
-RES_2K_TO_2K = "2K 真实硬件 -> 2K 物理屏 (1.0x)"
+RES_1080_TO_2K = "1080P OBS虚拟流/仿真源 -> 2K 物理屏 (1.33x)"
+RES_2K_TO_2K = "2K 真实硬件/OBS虚拟流 -> 2K 物理屏 (1.0x)"
 RES_MODE_CHOICES = [RES_1080_TO_1080, RES_1080_TO_2K, RES_2K_TO_2K]
 RES_MATRIX_BY_MODE = {
     RES_1080_TO_1080: {"scale": 1.0, "crop_width": 320, "crop_height": 320},
@@ -50,7 +52,10 @@ RES_MATRIX_BY_MODE = {
 RES_MODE_ALIAS = {
     "1080P -> 1080P": RES_1080_TO_1080,
     "1080P -> 2K": RES_1080_TO_2K,
+    "1080P 仿真源 -> 2K 物理屏 (1.33x)": RES_1080_TO_2K,
+    "1080P OBS虚拟流 -> 2K 物理屏 (1.33x)": RES_1080_TO_2K,
     "2K -> 2K": RES_2K_TO_2K,
+    "2K 真实硬件 -> 2K 物理屏 (1.0x)": RES_2K_TO_2K,
     "2K 仿真源 -> 2K 物理屏 (1.0x)": RES_2K_TO_2K,
 }
 
@@ -116,10 +121,18 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
         )
     if not config.has_option("Capture Methods", "simulation_video_path"):
         config.set("Capture Methods", "simulation_video_path", DEFAULT_SOURCE_PATH)
+    if not config.has_option("Capture Methods", "obs_camera_index"):
+        config.set("Capture Methods", "obs_camera_index", "1")
     if not config.has_option("Aim", "head_shot_ratio"):
         config.set("Aim", "head_shot_ratio", "0.3")
+    if not config.has_option("Aim", "anti_team_kill"):
+        config.set("Aim", "anti_team_kill", "True")
+    if not config.has_option("Aim", "teammate_color_threshold"):
+        config.set("Aim", "teammate_color_threshold", "0.10")
     if not config.has_option("Mouse", "mouse_sensitivity"):
         config.set("Mouse", "mouse_sensitivity", "3.0")
+    if not config.has_option("Mouse", "udp_output"):
+        config.set("Mouse", "udp_output", "False")
     if not config.has_option("AI", "AI_conf"):
         config.set("AI", "AI_conf", "0.2")
     for option in DEBUG_OPTIONS.values():
@@ -132,7 +145,9 @@ def _ensure_schema(config: configparser.ConfigParser) -> None:
     if not config.has_option("Control_Filter", "resolution_scale_factor"):
         config.set("Control_Filter", "resolution_scale_factor", "1.3333")
     if not config.has_option("Control_Filter", "current_res_mode"):
-        config.set("Control_Filter", "current_res_mode", "1080P -> 2K")
+        config.set("Control_Filter", "current_res_mode", "1080P OBS虚拟流 -> 2K 物理屏 (1.33x)")
+    if not config.has_option("Control_Filter", "ema_alpha"):
+        config.set("Control_Filter", "ema_alpha", "0.35")
 
 
 def normalize_res_mode(config_value: str) -> str:
@@ -244,6 +259,10 @@ def write_config(
 
     current_config = _new_parser()
     tag_threshold = current_config.get("Control_Filter", "tag_color_density_threshold", fallback="0.10")
+    ema_alpha = current_config.get("Control_Filter", "ema_alpha", fallback="0.35")
+    obs_camera_index = current_config.get("Capture Methods", "obs_camera_index", fallback="1")
+    anti_team_kill = current_config.get("Aim", "anti_team_kill", fallback="True")
+    teammate_threshold = current_config.get("Aim", "teammate_color_threshold", fallback=tag_threshold)
 
     _upsert_config_values({
         "Detection window": {
@@ -255,6 +274,7 @@ def write_config(
             "source_path": normalized_path,
             "simulation_mode": "True" if source_mode in {"video", "image"} else "False",
             "simulation_video_path": normalized_path,
+            "obs_camera_index": obs_camera_index,
         },
         "Debug window": debug_updates,
         "Control_Filter": {
@@ -262,10 +282,19 @@ def write_config(
             "tag_color_density_threshold": tag_threshold,
             "resolution_scale_factor": f"{resolution_scale_factor:.4f}".rstrip("0").rstrip("."),
             "current_res_mode": normalized_res_mode,
+            "ema_alpha": ema_alpha,
         },
         "AI": {"AI_conf": f"{float(ai_conf):.2f}"},
-        "Aim": {"head_shot_ratio": f"{float(head_shot_ratio):.2f}"},
-        "Mouse": {"mouse_sensitivity": f"{float(mouse_sensitivity):.2f}"},
+        "Aim": {
+            "head_shot_ratio": f"{float(head_shot_ratio):.2f}",
+            "anti_team_kill": anti_team_kill,
+            "teammate_color_threshold": teammate_threshold,
+        },
+        "Mouse": {
+            "mouse_sensitivity": f"{float(mouse_sensitivity):.2f}",
+            "udp_output": "False",
+        },
+        "UDP Output": {"udp_output": "False"},
     })
 
     return (
